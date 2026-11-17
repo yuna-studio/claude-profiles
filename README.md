@@ -1,20 +1,20 @@
 # claude-profiles (`ccp`)
 
 Use several Claude Code accounts on one computer without logging out and in again.
-Sign in once per account, then pick one with a command or let the folder you are in pick it.
+Sign in once per account; accounts are numbered, and you pick one by number, by command, or by the folder you are in.
 
 [한국어](README.ko.md)
 
 ```
 $ ccp ls
-  PROFILE        ACCOUNT                            PLAN           FOLDER
-* default        me@gmail.com                       max            /Users/me/.claude
-  work           me@company.com                     team           /Users/me/.claude-profiles/work
-  client         me@client.io                       pro            /Users/me/.claude-profiles/client
+  #   ACCOUNT                            PLAN           NAME
+* 1   me@gmail.com                       max            default (~/.claude)
+  2   me@company.com                     team           work
+  3   me@client.io                       pro            acct-3
 
 folder rules:
-  /Users/me/work → work
-  /Users/me/client-x → client
+  /Users/me/work → #2 work
+  /Users/me/client-x → #3
 ```
 
 ## Install
@@ -28,33 +28,38 @@ One bash script (bash 3.2+, macOS and Linux), no dependencies besides Claude Cod
 ## Use
 
 ```sh
-ccp add work                      # new profile; the browser opens to sign in with that account (once)
-ccp add client --email me@client.io
+ccp add                           # #2: the browser opens to sign in with that account (once)
+ccp add                           # #3
+ccp add -2                        # a new one at #2; the old #2 and #3 become #3 and #4
+ccp add work --email me@company.com   # a name is optional; numbers always work
 
-ccp here work ~/work              # ~/work and everything in it uses "work"
-ccp use client                    # or: one profile everywhere else
-ccp which                         # which profile a run here would use, and why
+ccp use 2                         # account #2 everywhere
+ccp here 3 ~/client-x             # ~/client-x and everything in it uses #3
+ccp mv 4 2                        # reorder
+ccp which                         # which account a run here would use, and why
 
-ccp run                           # start Claude Code with the profile for this folder
-ccp run -p work -- -c             # or a given profile, with any claude arguments
+ccp run                           # start Claude Code with the account for this folder
+ccp run -p 2 -- -c                # or a given one, with any claude arguments
 
 echo 'eval "$(ccp init zsh)"' >> ~/.zshrc   # optional: plain `claude` follows your profiles
 ```
 
-Which profile a run uses: `CCP_PROFILE` › the longest folder rule that covers the current folder › `ccp use` › `default`.
-`default` is your normal `~/.claude`, untouched.
+`#1` is your normal `~/.claude`, untouched. Which account a run uses: `CCP_PROFILE` (number or name) › the longest
+folder rule that covers the current folder › `ccp use` › `#1`. Rules and `ccp use` remember the account, not the number,
+so they keep pointing at the same account when you insert or move profiles.
 
 | command | does |
 |---|---|
-| `ccp add <name> [--isolated] [--email …] [--sso] [--console]` | new profile, signs in once |
-| `ccp ls` | profiles, their account and plan, folder rules |
-| `ccp use <name>` | default profile (`ccp use default` goes back to `~/.claude`) |
-| `ccp here <name> [dir]` · `ccp here --rm [dir]` | folder rule |
+| `ccp add [name] [-N] [--isolated] [--email …] [--sso] [--console]` | new profile at the end, or at number N (the rest move down); signs in once |
+| `ccp ls` | profiles by number, their account and plan, folder rules |
+| `ccp use <n\|name>` | default profile (`ccp use 1` goes back to `~/.claude`) |
+| `ccp here <n\|name> [dir]` · `ccp here --rm [dir]` | folder rule |
+| `ccp mv <n\|name> <N>` | move a profile to number N |
 | `ccp which [dir]` | profile for a folder, and why |
-| `ccp run [-p name] [-- claude args]` | run Claude Code with a profile |
-| `ccp env [name]` | `eval "$(ccp env work)"` pins the current shell |
-| `ccp login <name>` | sign a profile in again |
-| `ccp rm <name> [--yes]` | sign out and delete a profile |
+| `ccp run [-p n\|name] [-- claude args]` | run Claude Code with a profile |
+| `ccp env [n\|name]` | `eval "$(ccp env 2)"` pins the current shell |
+| `ccp login <n\|name>` | sign a profile in again |
+| `ccp rm <n\|name> [--yes]` | sign out and delete a profile; the rest move up |
 | `ccp init zsh\|bash` | shell function so `claude` uses `ccp run` |
 | `ccp prompt` | profile name for your prompt or status line |
 
@@ -63,7 +68,9 @@ Which profile a run uses: `CCP_PROFILE` › the longest folder rule that covers 
 Claude Code keeps everything in one config folder, `~/.claude`, or the folder in `CLAUDE_CONFIG_DIR`.
 When `CLAUDE_CONFIG_DIR` is set, Claude Code also stores the login under its own name: a separate macOS keychain
 item (`Claude Code-credentials-<hash of the folder>`), or `.credentials.json` inside that folder on Linux.
-So a profile is just a folder in `~/.claude-profiles/<name>`, and `ccp` runs `claude` with `CLAUDE_CONFIG_DIR` pointing at it.
+So a profile is just a folder in `~/.claude-profiles/<name>` (`acct-N` when unnamed), and `ccp` runs `claude` with
+`CLAUDE_CONFIG_DIR` pointing at it. Because the login is tied to the folder's path, folders never get renamed: the
+numbers come from a separate order file, and a removed folder name is never reused.
 
 Each profile links back to the shared parts of `~/.claude`: `settings.json`, `CLAUDE.md`, `agents`, `commands`,
 `skills`, `output-styles`, `plugins`, `keybindings.json` and `projects` (session history and memory, so `claude --resume`
