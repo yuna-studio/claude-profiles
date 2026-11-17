@@ -116,7 +116,7 @@ ok "a removed folder name is never reused" '[ -f "$P/acct-7/.ccp" ] && [ ! -e "$
 
 # usage: a fake usage endpoint and sign-ins in the files Claude Code uses on Linux (keychain skipped)
 PORT_FILE="$T/port"
-python3 - "$PORT_FILE" >/dev/null 2>&1 <<'EOF' &
+cat > "$T/srv.py" <<'EOF'
 import http.server, json, sys
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -133,8 +133,10 @@ s = http.server.HTTPServer(("127.0.0.1", 0), H)
 open(sys.argv[1], "w").write(str(s.server_port))
 s.serve_forever()
 EOF
+python3 "$T/srv.py" "$PORT_FILE" >"$T/srv.log" 2>&1 &   # a file, not a heredoc on a background job (bash 3.2)
 SRV=$!
 i=0; while [ ! -s "$PORT_FILE" ] && [ "$i" -lt 100 ]; do sleep 0.2; i=$((i + 1)); done   # a cold python3 can take seconds
+[ -s "$PORT_FILE" ] || { echo "fake usage endpoint did not start:"; cat "$T/srv.log"; }
 CCP_USAGE_URL="http://127.0.0.1:$(cat "$PORT_FILE")/usage"
 export CCP_NO_KEYCHAIN=1 CCP_USAGE_URL
 export no_proxy=127.0.0.1,localhost NO_PROXY=127.0.0.1,localhost   # macOS runners: urllib would follow the system proxy
