@@ -134,7 +134,7 @@ open(sys.argv[1], "w").write(str(s.server_port))
 s.serve_forever()
 EOF
 SRV=$!
-for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$PORT_FILE" ] && break; sleep 0.3; done
+i=0; while [ ! -s "$PORT_FILE" ] && [ "$i" -lt 100 ]; do sleep 0.2; i=$((i + 1)); done   # a cold python3 can take seconds
 CCP_USAGE_URL="http://127.0.0.1:$(cat "$PORT_FILE")/usage"
 export CCP_NO_KEYCHAIN=1 CCP_USAGE_URL
 export no_proxy=127.0.0.1,localhost NO_PROXY=127.0.0.1,localhost   # macOS runners: urllib would follow the system proxy
