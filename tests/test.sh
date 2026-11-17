@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ccp tests: a stub `claude` stands in for Claude Code, HOME is a temp folder. Run: bash tests/test.sh
 set -u
+# shellcheck disable=SC2034  # P and out are read inside the ok() checks, which eval their condition
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/ccp-test.XXXXXX")" && pwd -P)"   # real path: macOS /var is a link
 trap 'rm -rf "$T"' EXIT
@@ -30,7 +31,7 @@ pass=0; fail=0
 ok() { if eval "$2"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL: $1"; echo "      $2"; fi; }
 has() { case "$1" in *"$2"*) return 0 ;; esac; echo "      got: $1" >&2; return 1; }
 
-cd "$HOME"
+cd "$HOME" || exit 1
 out="$(ccp ls)"
 ok "ls: only the default profile at first" 'has "$out" "* default" && has "$out" "not logged in"'
 
