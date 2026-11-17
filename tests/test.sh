@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034  # P and out are read inside the ok() checks, which eval their condition
 # ccp tests: a stub `claude` stands in for Claude Code, HOME is a temp folder. Run: bash tests/test.sh
 set -u
-# shellcheck disable=SC2034  # P and out are read inside the ok() checks, which eval their condition
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/ccp-test.XXXXXX")" && pwd -P)"   # real path: macOS /var is a link
 trap 'rm -rf "$T"' EXIT
