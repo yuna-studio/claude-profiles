@@ -135,7 +135,8 @@ s.serve_forever()
 EOF
 SRV=$!
 for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$PORT_FILE" ] && break; sleep 0.3; done
-export CCP_NO_KEYCHAIN=1 CCP_USAGE_URL="http://127.0.0.1:$(cat "$PORT_FILE")/usage"
+CCP_USAGE_URL="http://127.0.0.1:$(cat "$PORT_FILE")/usage"
+export CCP_NO_KEYCHAIN=1 CCP_USAGE_URL
 future=$(( ($(date +%s) + 86400) * 1000 ))
 echo "{\"claudeAiOauth\":{\"accessToken\":\"tok-1\",\"expiresAt\":$future,\"subscriptionType\":\"max\",\"rateLimitTier\":\"default_claude_max_20x\"}}" > "$HOME/.claude/.credentials.json"
 echo '{"oauthAccount":{"emailAddress":"me@x.com"}}' > "$HOME/.claude.json.usage"; cp "$HOME/.claude.json.usage" "$HOME/.claude.json"
