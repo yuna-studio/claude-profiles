@@ -1,0 +1,15 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claude-profiles",
+  "description": "ccp: several Claude Code accounts on one computer, with live usage per account",
+  "owner": { "name": "Yuna Studio" },
+  "plugins": [
+    {
+      "name": "ccp",
+      "description": "Several Claude Code accounts on one computer: list them, see each one's usage limits, pick the next one, continue a conversation on another account.",
+      "source": "./plugin",
+      "category": "productivity",
+      "homepage": "https://github.com/yuna-studio/claude-profiles"
+    }
+  ]
+}

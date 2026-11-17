@@ -114,7 +114,51 @@ ok "rm: never #1" '! ccp rm 1 --yes 2>/dev/null && ! ccp rm default --yes 2>/dev
 ccp add --no-login >/dev/null
 ok "a removed folder name is never reused" '[ -f "$P/acct-7/.ccp" ] && [ ! -e "$P/acct-2" ]'
 
-ok "help and version" 'has "$(ccp help)" "ccp add" && has "$(ccp --version)" "ccp 0.3"'
+# usage: a fake usage endpoint and sign-ins in the files Claude Code uses on Linux (keychain skipped)
+PORT_FILE="$T/port"
+python3 - "$PORT_FILE" >/dev/null 2>&1 <<'EOF' &
+import http.server, json, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        tok = self.headers.get("Authorization", "")
+        body = {"Bearer tok-1": {"limits": [{"kind": "weekly_all", "percent": 48, "resets_at": "2099-01-01T00:00:00+00:00"},
+                                            {"kind": "weekly_scoped", "percent": 0, "resets_at": "2099-01-01T00:00:00+00:00", "scope": {"model": {"display_name": "Fable"}}}],
+                                 "five_hour": {"utilization": 91.0, "resets_at": "2099-01-01T00:00:00Z"}},
+                "Bearer tok-3": {"seven_day": {"utilization": 12.0, "resets_at": "2099-01-01T00:00:00Z"}}}.get(tok)
+        if self.headers.get("anthropic-beta") != "oauth-2025-04-20" or body is None:
+            self.send_response(401); self.end_headers(); return
+        self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(body).encode())
+    def log_message(self, *a): pass
+s = http.server.HTTPServer(("127.0.0.1", 0), H)
+open(sys.argv[1], "w").write(str(s.server_port))
+s.serve_forever()
+EOF
+SRV=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$PORT_FILE" ] && break; sleep 0.3; done
+export CCP_NO_KEYCHAIN=1 CCP_USAGE_URL="http://127.0.0.1:$(cat "$PORT_FILE")/usage"
+future=$(( ($(date +%s) + 86400) * 1000 ))
+echo "{\"claudeAiOauth\":{\"accessToken\":\"tok-1\",\"expiresAt\":$future,\"subscriptionType\":\"max\",\"rateLimitTier\":\"default_claude_max_20x\"}}" > "$HOME/.claude/.credentials.json"
+echo '{"oauthAccount":{"emailAddress":"me@x.com"}}' > "$HOME/.claude.json.usage"; cp "$HOME/.claude.json.usage" "$HOME/.claude.json"
+echo "{\"claudeAiOauth\":{\"accessToken\":\"tok-3\",\"expiresAt\":$future,\"subscriptionType\":\"pro\"}}" > "$P/acct-4/.credentials.json"
+echo '{"oauthAccount":{"emailAddress":"four@x.com"}}' > "$P/acct-4/.claude.json"
+echo '{"claudeAiOauth":{"accessToken":"tok-old","expiresAt":1000,"subscriptionType":"pro"}}' > "$P/acct-5/.credentials.json"
+echo "{\"claudeAiOauth\":{\"accessToken\":\"tok-bad\",\"expiresAt\":$future}}" > "$P/acct-6/.credentials.json"
+out="$(ccp usage)"
+ok "usage: limits per account, used and left, 5-hour first" 'has "$out" "me@x.com" && has "$out" "max 20x" && has "$out" "5-hour" && has "$out" " 91%     9%" && has "$out" "week           " && has "$out" " 48%    52%" && has "$out" "week · Fable"'
+ok "usage: the older response shape works too" 'has "$out" "four@x.com" && has "$out" " 12%    88%"'
+ok "usage: expired and rejected sign-ins say what to do" 'has "$out" "sign-in expired: open #4 once" && has "$out" "sign-in expired: open #5 once"'
+ok "usage: accounts without a sign-in" 'has "$out" "not logged in"'
+ok "usage: never shows a token" '! has "$out" "tok-" 2>/dev/null'
+ok "usage: marks the account used here" 'has "$out" "* 1 "'
+js="$(ccp usage --json)"
+ok "usage --json: for scripts, still no token" 'has "$js" "\"used\": 48.0" && ! has "$js" "tok-" 2>/dev/null'
+ok "top: without a terminal prints once" 'has "$(ccp top </dev/null)" "me@x.com"'
+{ kill "$SRV"; wait "$SRV"; } 2>/dev/null
+
+V="$(sed -n 's/^VERSION="\(.*\)"/\1/p' "$ROOT/ccp")"
+ok "plugin ships the same ccp, one version everywhere" 'cmp -s "$ROOT/ccp" "$ROOT/plugin/bin/ccp" && grep -q "\"version\": \"$V\"" "$ROOT/plugin/.claude-plugin/plugin.json" && grep -q "version \"$V\"" "$ROOT/Formula/ccp.rb" && grep -q "download/v$V/ccp" "$ROOT/Formula/ccp.rb"'
+
+ok "help and version" 'has "$(ccp help)" "ccp add" && has "$(ccp --version)" "ccp 0.4"'
 
 echo "$pass passed, $fail failed"
 [ "$fail" = 0 ]

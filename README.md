@@ -1,7 +1,8 @@
 # claude-profiles (`ccp`)
 
 Use several Claude Code accounts on one computer without logging out and in again.
-Sign in once per account; accounts are numbered, and you pick one by number, by command, or by the folder you are in.
+Sign in once per account; accounts are numbered, you pick one by number, by command, or by the folder you are in,
+and `ccp top` shows every account's usage limits live.
 
 [한국어](README.ko.md)
 
@@ -17,13 +18,39 @@ folder rules:
   /Users/me/client-x → #3
 ```
 
+```
+$ ccp top
+ccp 0.4.0 · usage per account · 14:08:04 · refresh 60s (next in 57s) · r refresh · q quit
+
+  #   ACCOUNT                        PLAN       LIMIT          USED                      LEFT  RESETS
+* 1   me@gmail.com                   max 20x    5-hour         ████████████████░░  91%     9%  in 1h 12m
+                                                week           █████████░░░░░░░░░  48%    52%  in 5d 21h
+  2   me@company.com                 team       week           ██░░░░░░░░░░░░░░░░  12%    88%  in 3d 2h
+  3   me@client.io                   pro        sign-in expired: open #3 once (ccp run -p 3)
+```
+
 ## Install
+
+Homebrew:
+
+```sh
+brew tap yuna-studio/claude-profiles https://github.com/yuna-studio/claude-profiles
+brew install ccp
+```
+
+As a Claude Code plugin (adds `/ccp:usage`, `/ccp:accounts`, `/ccp:use`, `/ccp:switch`, and `ccp` inside Claude Code):
+
+```
+/plugin install ccp --marketplace yuna-studio/claude-profiles
+```
+
+Or the script alone:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/yuna-studio/claude-profiles/main/install.sh | sh
 ```
 
-One bash script (bash 3.2+, macOS and Linux), no dependencies besides Claude Code itself. Or copy `ccp` anywhere on your `PATH`.
+One bash script (bash 3.2+, macOS and Linux); the usage view also needs `python3`. Nothing else besides Claude Code.
 
 ## Use
 
@@ -37,6 +64,7 @@ ccp use 2                         # account #2 everywhere
 ccp here 3 ~/client-x             # ~/client-x and everything in it uses #3
 ccp mv 4 2                        # reorder
 ccp which                         # which account a run here would use, and why
+ccp usage                         # every account's limits once; ccp top keeps them live
 
 ccp run                           # start Claude Code with the account for this folder
 ccp run -p 2 -- -c                # or a given one, with any claude arguments
@@ -52,6 +80,8 @@ so they keep pointing at the same account when you insert or move profiles.
 |---|---|
 | `ccp add [name] [-N] [--isolated] [--email …] [--sso] [--console]` | new profile at the end, or at number N (the rest move down); signs in once |
 | `ccp ls` | profiles by number, their account and plan, folder rules |
+| `ccp usage [--json]` | each account's limits: used, left, when they reset |
+| `ccp top [--every 60]` | the same, live in the terminal (`r` refresh, `q` quit) |
 | `ccp use <n\|name>` | default profile (`ccp use 1` goes back to `~/.claude`) |
 | `ccp here <n\|name> [dir]` · `ccp here --rm [dir]` | folder rule |
 | `ccp mv <n\|name> <N>` | move a profile to number N |
@@ -99,7 +129,10 @@ Each profile links back to the shared parts of `~/.claude`: `settings.json`, `CL
 sees the same sessions under every account). User-level MCP servers are copied from `~/.claude.json` when the profile is made.
 The account, its login and its `.claude.json` stay per profile. `--isolated` shares nothing.
 
-`ccp` never reads or copies a token; signing in and out is done by `claude auth login` / `claude auth logout`.
+`ccp` signs in and out only through `claude auth login` / `claude auth logout`. For `ccp usage` and `ccp top` it reads
+each account's sign-in token from where Claude Code keeps it (the keychain item, or `.credentials.json`) and sends it
+only to Anthropic's usage endpoint, the same request Claude Code's `/usage` makes. The token is never printed, stored,
+or put on a command line. An expired token is not refreshed: open that account once and Claude Code renews it.
 
 ## Notes
 

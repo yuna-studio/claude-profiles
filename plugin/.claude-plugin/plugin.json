@@ -1,0 +1,9 @@
+{
+  "name": "ccp",
+  "description": "Several Claude Code accounts on one computer: list them, see each one's usage limits, pick the next one, continue a conversation on another account.",
+  "version": "0.4.0",
+  "author": { "name": "Yuna Studio" },
+  "homepage": "https://github.com/yuna-studio/claude-profiles",
+  "repository": "https://github.com/yuna-studio/claude-profiles",
+  "license": "MIT"
+}

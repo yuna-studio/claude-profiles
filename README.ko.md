@@ -2,6 +2,7 @@
 
 컴퓨터 한 대에서 Claude Code 계정 여러 개를 로그아웃 · 로그인 없이 바꿔 써요.
 계정마다 한 번만 로그인해 두면 번호가 붙고, 번호 · 명령 · 지금 있는 폴더로 골라 써요.
+`ccp top` 은 계정마다 사용 한도가 얼마나 남았는지 실시간으로 보여 줘요.
 
 [English](README.md)
 
@@ -13,13 +14,39 @@ $ ccp ls
   3   me@client.io                       pro            acct-3
 ```
 
+```
+$ ccp top
+ccp 0.4.0 · usage per account · 14:08:04 · refresh 60s (next in 57s) · r refresh · q quit
+
+  #   ACCOUNT                        PLAN       LIMIT          USED                      LEFT  RESETS
+* 1   me@gmail.com                   max 20x    5-hour         ████████████████░░  91%     9%  in 1h 12m
+                                                week           █████████░░░░░░░░░  48%    52%  in 5d 21h
+  2   me@company.com                 team       week           ██░░░░░░░░░░░░░░░░  12%    88%  in 3d 2h
+  3   me@client.io                   pro        sign-in expired: open #3 once (ccp run -p 3)
+```
+
 ## 설치
+
+Homebrew:
+
+```sh
+brew tap yuna-studio/claude-profiles https://github.com/yuna-studio/claude-profiles
+brew install ccp
+```
+
+Claude Code 플러그인(Claude 안에서 `/ccp:usage` · `/ccp:accounts` · `/ccp:use` · `/ccp:switch`, 그리고 `ccp` 명령):
+
+```
+/plugin install ccp --marketplace yuna-studio/claude-profiles
+```
+
+스크립트만:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/yuna-studio/claude-profiles/main/install.sh | sh
 ```
 
-bash 스크립트 하나예요(bash 3.2 이상, macOS · Linux). Claude Code 말고 따로 필요한 건 없어요.
+bash 스크립트 하나예요(bash 3.2 이상, macOS · Linux). 한도 화면만 `python3` 가 더 필요해요.
 
 ## 쓰기
 
@@ -33,6 +60,7 @@ ccp use 2                         # 어디서나 2번 계정
 ccp here 3 ~/client-x             # ~/client-x 와 그 안 폴더는 3번 계정
 ccp mv 4 2                        # 순서 바꾸기
 ccp which                         # 여기서 몇 번으로 열리는지, 왜 그런지
+ccp usage                         # 계정마다 한도: 쓴 양 · 남은 양 · 초기화까지 (ccp top 은 실시간)
 ccp run                           # 이 폴더에 맞는 계정으로 Claude Code 실행
 
 echo 'eval "$(ccp init zsh)"' >> ~/.zshrc   # 선택: 그냥 `claude` 를 쳐도 규칙대로 열림
@@ -68,7 +96,8 @@ Claude Code 는 설정 폴더(`~/.claude`, 또는 `CLAUDE_CONFIG_DIR`)를 하나
 
 설정 · CLAUDE.md · 에이전트 · 명령 · 스킬 · 플러그인 · 대화 기록(projects)은 `~/.claude` 것을 함께 써서, 어느 계정으로 열어도
 같은 환경이고 `claude --resume` 도 같은 대화를 보여요. 계정 · 로그인만 프로필마다 따로예요. `--isolated` 는 아무것도 나누지 않아요.
-`ccp` 는 토큰을 읽거나 옮기지 않아요. 로그인 · 로그아웃은 `claude auth login` / `logout` 이 해요.
+로그인 · 로그아웃은 `claude auth login` / `logout` 이 해요. `ccp usage` · `ccp top` 은 계정마다 Claude Code 가 둔 로그인 토큰(키체인 · `.credentials.json`)을 읽어
+Anthropic 사용량 주소(Claude 안의 `/usage` 와 같은 요청)에만 보내요. 토큰은 화면 · 파일 · 명령줄에 남기지 않고, 만료되면 그 계정으로 한 번 열면 Claude Code 가 갱신해요.
 
 ## 알아 둘 것
 

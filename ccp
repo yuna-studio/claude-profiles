@@ -10,7 +10,7 @@
 #
 # Works with bash 3.2 (stock macOS). https://github.com/yuna-studio/claude-profiles  ·  MIT
 set -u
-VERSION="0.3.0"
+VERSION="0.4.0"
 CCP_HOME="${CCP_HOME:-$HOME/.claude-profiles}"
 BASE="${CCP_BASE:-$HOME/.claude}"   # the default profile's folder: what other profiles share from
 TAB="$(printf '\t')"
@@ -322,6 +322,210 @@ cmd_rm() {
   say "removed $was"
 }
 
+usage_rows() {   # one line per profile for the usage view: number, id, config folder ("" for #1), label
+  local id i=0
+  for id in $(ids); do
+    i=$((i + 1))
+    if [ "$id" = default ]; then printf '%s\t%s\t\t%s\n' "$i" "$id" "$(label "$id")"
+    else printf '%s\t%s\t%s\t%s\n' "$i" "$id" "$(pdir "$id")" "$(label "$id")"; fi
+  done
+}
+
+cmd_usage() {   # ccp usage [--json] · ccp top [--every SECONDS]
+  local mode="$1" every=60; shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) mode=json ;;
+      --every) shift; every="${1:-60}" ;;
+      *) die "usage: ccp usage [--json]   ·   ccp top [--every SECONDS]" ;;
+    esac
+    shift
+  done
+  case "$every" in ""|*[!0-9]*) die "--every takes seconds" ;; esac
+  [ "$every" -ge 30 ] || every=30   # be gentle with the usage endpoint
+  command -v python3 >/dev/null 2>&1 || die "usage needs python3"
+  local here; here="$(ref "$(resolve . | cut -f1)" 2>/dev/null)" || here=""
+  CCP_ROWS="$(usage_rows)" CCP_BASE_DIR="$BASE" CCP_VERSION="$VERSION" CCP_HERE="${CCP_ACTIVE:-$here}" \
+    python3 -c "$USAGE_PY" "$mode" "$every"
+}
+
+# The usage view. Each account's sign-in token is read (macOS keychain item or .credentials.json, the same places
+# Claude Code keeps it) only to ask Anthropic for that account's usage, the request Claude Code's /usage makes. It is
+# never printed, stored or put on a command line.
+IFS= read -r -d '' USAGE_PY <<'PY' || true   # read, not $(cat <<…): bash 3.2 misparses quotes in a heredoc inside $()
+import datetime, hashlib, json, os, re, select, shutil, subprocess, sys, time, unicodedata, urllib.error, urllib.request
+
+URL = os.environ.get("CCP_USAGE_URL", "https://api.anthropic.com/api/oauth/usage")
+BASE = os.environ.get("CCP_BASE_DIR") or os.path.expanduser("~/.claude")
+MODE, EVERY = sys.argv[1], int(sys.argv[2])
+ROWS = [dict(zip(("n", "id", "dir", "label"), l.split("\t"))) for l in os.environ.get("CCP_ROWS", "").splitlines() if l]
+COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+
+def keychain_user():
+    u = os.environ.get("USER") or ""
+    if not u:
+        try:
+            import pwd
+            u = pwd.getpwuid(os.getuid()).pw_name
+        except Exception:
+            u = ""
+    return u if re.fullmatch(r"[a-zA-Z0-9._-]+", u) else "claude-code-user"
+
+
+def credentials(d):
+    """The claudeAiOauth block for a config folder ("" = the default), from where Claude Code keeps it."""
+    if sys.platform == "darwin" and not os.environ.get("CCP_NO_KEYCHAIN"):
+        svc = "Claude Code-credentials"
+        if d:   # Claude Code names a CLAUDE_CONFIG_DIR login after the folder's path
+            svc += "-" + hashlib.sha256(unicodedata.normalize("NFC", d).encode()).hexdigest()[:8]
+        try:
+            r = subprocess.run(["security", "find-generic-password", "-a", keychain_user(), "-s", svc, "-w"],
+                               capture_output=True, text=True, timeout=10)
+            if r.returncode == 0 and r.stdout.strip():
+                return json.loads(r.stdout).get("claudeAiOauth")
+        except Exception:
+            pass
+    try:
+        with open(os.path.join(d or BASE, ".credentials.json")) as f:
+            return json.load(f).get("claudeAiOauth")
+    except Exception:
+        return None
+
+
+def email(d):
+    try:
+        with open(os.path.join(d, ".claude.json") if d else os.path.expanduser("~/.claude.json")) as f:
+            return (json.load(f).get("oauthAccount") or {}).get("emailAddress") or "-"
+    except Exception:
+        return "-"
+
+
+def plan(c):
+    p = (c or {}).get("subscriptionType") or "-"
+    m = re.search(r"(\d+x)", (c or {}).get("rateLimitTier") or "")
+    return f"{p} {m.group(1)}" if m else p
+
+
+def when(s):
+    try:
+        return datetime.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
+def limits(u):
+    out = []
+    for l in u.get("limits") or []:
+        kind = l.get("kind") or ""
+        name = {"session": "5-hour", "five_hour": "5-hour", "weekly_all": "week"}.get(kind, kind.replace("_", " "))
+        model = (((l.get("scope") or {}).get("model")) or {}).get("display_name")
+        if kind == "weekly_scoped" and model:
+            name = "week · " + model
+        out.append({"name": name, "used": float(l.get("percent") or 0), "resets": when(l.get("resets_at") or "")})
+    names = {x["name"] for x in out}
+    for key, name in (("five_hour", "5-hour"), ("seven_day", "week"), ("seven_day_opus", "week · Opus"), ("seven_day_sonnet", "week · Sonnet")):
+        w = u.get(key)
+        if isinstance(w, dict) and name not in names and w.get("utilization") is not None:
+            out.append({"name": name, "used": float(w["utilization"]), "resets": when(w.get("resets_at") or "")})
+    order = {"5-hour": 0, "week": 1}
+    return sorted(out, key=lambda x: order.get(x["name"], 2))
+
+
+def fetch(row):
+    c = credentials(row["dir"])
+    r = {"n": int(row["n"]), "id": row["id"], "label": row["label"], "email": email(row["dir"]), "plan": plan(c), "limits": [], "error": None}
+    if not c or not c.get("accessToken"):
+        r["error"] = "not logged in"
+        return r
+    if c.get("expiresAt") and c["expiresAt"] / 1000 < time.time():
+        r["error"] = f"sign-in expired: open #{row['n']} once (ccp run -p {row['n']})"
+        return r
+    req = urllib.request.Request(URL, headers={"Authorization": "Bearer " + c["accessToken"], "anthropic-beta": "oauth-2025-04-20",
+                                               "User-Agent": "ccp/" + os.environ.get("CCP_VERSION", "")})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as f:
+            r["limits"] = limits(json.load(f))
+    except urllib.error.HTTPError as e:
+        r["error"] = {401: f"sign-in expired: open #{row['n']} once (ccp run -p {row['n']})", 429: "asked too often; next refresh"}.get(e.code, f"usage unavailable (HTTP {e.code})")
+    except Exception:
+        r["error"] = "offline or usage unavailable"
+    return r
+
+
+def ago(sec):
+    if sec is None:
+        return ""
+    sec = max(0, int(sec))
+    d, h, m = sec // 86400, sec % 86400 // 3600, sec % 3600 // 60
+    return f"{d}d {h}h" if d else (f"{h}h {m:02d}m" if h else f"{m}m")
+
+
+def paint(s, used):
+    if not COLOR:
+        return s
+    c = "32" if used < 60 else ("33" if used < 85 else "31")
+    return f"\033[{c}m{s}\033[0m"
+
+
+def lines(results, fetched_at):
+    width = shutil.get_terminal_size((110, 30)).columns
+    barw = max(10, min(24, width - 92))
+    now = time.time()
+    out = [f"  {'#':<3} {'ACCOUNT':<30} {'PLAN':<10} {'LIMIT':<14} {'USED':<{barw + 6}} {'LEFT':>5}  RESETS"]
+    for r in results:
+        mark = "*" if r["id"] == os.environ.get("CCP_HERE") else " "
+        head = f"{mark} {r['n']:<3} {r['email'][:30]:<30} {r['plan'][:10]:<10} "
+        if r["error"] or not r["limits"]:
+            out.append(head + (r["error"] or "no limits reported"))
+            continue
+        for i, l in enumerate(r["limits"]):
+            fill = int(round(barw * min(l["used"], 100) / 100))
+            bar = paint("█" * fill, l["used"]) + "░" * (barw - fill)
+            left = f"{max(0, 100 - l['used']):.0f}%"
+            reset = f"in {ago(l['resets'] - now)}" if l["resets"] else ""
+            out.append((head if i == 0 else " " * len(head)) + f"{l['name'][:14]:<14} {bar} {l['used']:>3.0f}%  {left:>5}  {reset}")
+    out.append("")
+    out.append(f"usage as of {time.strftime('%H:%M:%S', time.localtime(fetched_at))} · * = the account claude uses here")
+    return out
+
+
+def top():
+    import termios, tty
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    tty.setcbreak(fd)
+    sys.stdout.write("\033[?25l")
+    results, last = [], 0.0
+    try:
+        while True:
+            if time.time() - last >= EVERY:
+                results, last = [fetch(r) for r in ROWS], time.time()
+            head = f"ccp {os.environ.get('CCP_VERSION', '')} · usage per account · {time.strftime('%H:%M:%S')} · refresh {EVERY}s (next in {max(0, int(EVERY - (time.time() - last)))}s) · r refresh · q quit"
+            sys.stdout.write("\033[H\033[2J" + "\n".join([head, ""] + lines(results, last)) + "\n")
+            sys.stdout.flush()
+            if select.select([sys.stdin], [], [], 1)[0]:
+                k = sys.stdin.read(1)
+                if k in ("q", "Q", "\x1b"):
+                    break
+                if k in ("r", "R"):
+                    last = 0.0
+    except KeyboardInterrupt:
+        pass
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        sys.stdout.write("\033[?25h")
+
+
+if MODE == "json":
+    json.dump([fetch(r) for r in ROWS], sys.stdout, indent=2)
+    print()
+elif MODE == "top" and sys.stdin.isatty() and sys.stdout.isatty():
+    top()
+else:
+    print("\n".join(lines([fetch(r) for r in ROWS], time.time())))
+PY
+
 cmd_init() {   # eval "$(ccp init zsh)" in ~/.zshrc (or bash): plain `claude` picks the profile
   case "${1:-}" in
     zsh|bash|"") cat <<'EOF'
@@ -346,6 +550,8 @@ ccp $VERSION — several Claude Code accounts on one computer, no logging in aga
   ccp add [name] [-N]           new profile at the end, or at number N (the rest move down); signs in once
                                 [--isolated] [--no-login] [--email you@x.com] [--sso] [--console]
   ccp ls                        profiles by number, their accounts and plans, folder rules
+  ccp usage [--json]            each account's limits: used, left, when they reset
+  ccp top [--every 60]          the same, live in the terminal (r refresh, q quit)
   ccp use <n|name>              default profile everywhere (ccp use 1: back to ~/.claude)
   ccp here <n|name> [dir]       this folder and everything in it uses that profile   (ccp here --rm [dir])
   ccp mv <n|name> <N>           move a profile to number N
@@ -375,6 +581,8 @@ main() {
     env) cmd_env "$@" ;;
     run) cmd_run "$@" ;;
     sw|switch) cmd_sw "$@" ;;
+    usage) cmd_usage once "$@" ;;
+    top) cmd_usage top "$@" ;;
     rm|remove) cmd_rm "$@" ;;
     init) cmd_init "$@" ;;
     prompt) cmd_prompt ;;
