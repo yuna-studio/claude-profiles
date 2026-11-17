@@ -13,6 +13,7 @@ echo '{"mcpServers":{"docs":{"command":"docs-mcp"}},"oauthAccount":{"emailAddres
 cat > "$T/bin/claude" <<'EOF'
 #!/bin/bash
 cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+[ "${1:-}" = active ] && { echo "ACTIVE=${CCP_ACTIVE:-}"; exit 0; }
 case "$1 ${2:-}" in
   "auth status")
     if [ -f "$cfg/.stub-login" ]; then printf '{"loggedIn": true, "email": "%s@x.com", "subscriptionType": "max", "authMethod": "claude.ai"}\n' "$(basename "${CLAUDE_CONFIG_DIR:-default}")"
@@ -95,6 +96,9 @@ ok "ls: rules show the number" 'has "$out" "$HOME/w → #4"'
 eval "$(ccp env 3)"
 ok "env: pins the shell (by number)" '[ "$CLAUDE_CONFIG_DIR" = "$P/acct-4" ] && [ "$CCP_PROFILE" = acct-4 ]'
 unset CLAUDE_CONFIG_DIR CCP_PROFILE
+ok "sw: continues the last conversation on another account" '[ "$(ccp sw 3)" = "CONFIG=$P/acct-4 ARGS=--continue" ] && [ "$(ccp sw work -- --resume abc)" = "CONFIG=$P/work ARGS=--resume abc" ]'
+ok "run: tells Claude Code which account it runs on" '[ "$(ccp run -p 3 -- active)" = "ACTIVE=acct-4" ] && [ "$(ccp run -p 1 -- active)" = "ACTIVE=default" ]'
+ok "prompt: inside Claude Code, the running account (even #1)" '[ "$(CCP_ACTIVE=acct-4 ccp prompt)" = "#3" ] && [ "$(CCP_ACTIVE=default ccp prompt)" = "#1 default" ] && [ "$(CCP_ACTIVE=work ccp prompt)" = "#5 work" ]'
 ok "init: defines claude() over ccp run" 'has "$(ccp init zsh)" "claude() { command ccp run -- \"\$@\"; }"'
 ok "prompt: empty for #1, the number (and name) otherwise" '[ "$(cd "$HOME/w/a" && ccp prompt)" = "" ] && [ "$(cd "$HOME/w/x" && ccp prompt)" = "#4" ] && [ "$(cd "$HOME/w2" && ccp prompt)" = "#5 work" ]'
 
@@ -110,7 +114,7 @@ ok "rm: never #1" '! ccp rm 1 --yes 2>/dev/null && ! ccp rm default --yes 2>/dev
 ccp add --no-login >/dev/null
 ok "a removed folder name is never reused" '[ -f "$P/acct-7/.ccp" ] && [ ! -e "$P/acct-2" ]'
 
-ok "help and version" 'has "$(ccp help)" "ccp add" && has "$(ccp --version)" "ccp 0.2"'
+ok "help and version" 'has "$(ccp help)" "ccp add" && has "$(ccp --version)" "ccp 0.3"'
 
 echo "$pass passed, $fail failed"
 [ "$fail" = 0 ]

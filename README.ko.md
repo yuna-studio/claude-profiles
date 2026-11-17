@@ -41,6 +41,24 @@ echo 'eval "$(ccp init zsh)"' >> ~/.zshrc   # 선택: 그냥 `claude` 를 쳐도
 1번은 원래 쓰던 `~/.claude`(손대지 않음). 고르는 순서: `CCP_PROFILE`(번호나 이름) › 지금 폴더를 덮는 가장 긴 폴더 규칙 › `ccp use` › 1번.
 폴더 규칙과 `ccp use` 는 번호가 아니라 계정을 기억해서, 끼워 넣거나 순서를 바꿔도 같은 계정을 가리켜요.
 
+## 쓰는 중에 계정 바꾸기
+
+실행 중인 Claude Code 는 시작할 때 계정으로 고정돼요. 다른 계정으로 바꾸려면 나왔다가 그 계정으로 다시 들어가요.
+
+```sh
+/exit                 # Claude Code 안에서
+ccp sw 2              # 이 폴더의 마지막 대화가 2번 계정으로 그대로 이어져요
+ccp sw work -- --resume   # 다른 대화를 골라 이어도 돼요
+```
+
+대화 기록은 계정끼리 같이 써서 잃는 게 없어요. Claude Code 안에서 `! ccp ls` 로 계정 목록을 보고, `! ccp use 2` 로 다음 시작을 2번으로 정할 수 있어요.
+
+지금 몇 번 계정인지 늘 보이게 하려면 `~/.claude/settings.json` 상태 줄에 `ccp prompt` 를 넣어요.
+
+```json
+{ "statusLine": { "type": "command", "command": "ccp prompt" } }
+```
+
 ## 어떻게 되나
 
 Claude Code 는 설정 폴더(`~/.claude`, 또는 `CLAUDE_CONFIG_DIR`)를 하나 써요. `CLAUDE_CONFIG_DIR` 를 주면 로그인도 따로

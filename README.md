@@ -57,11 +57,33 @@ so they keep pointing at the same account when you insert or move profiles.
 | `ccp mv <n\|name> <N>` | move a profile to number N |
 | `ccp which [dir]` | profile for a folder, and why |
 | `ccp run [-p n\|name] [-- claude args]` | run Claude Code with a profile |
+| `ccp sw <n\|name> [-- claude args]` | continue the last conversation here on another account (`--continue`) |
 | `ccp env [n\|name]` | `eval "$(ccp env 2)"` pins the current shell |
 | `ccp login <n\|name>` | sign a profile in again |
 | `ccp rm <n\|name> [--yes]` | sign out and delete a profile; the rest move up |
 | `ccp init zsh\|bash` | shell function so `claude` uses `ccp run` |
-| `ccp prompt` | profile name for your prompt or status line |
+| `ccp prompt` | `#2 work`: the account a session runs on, for Claude Code's status line or your prompt |
+
+## Switch accounts while you work
+
+A running Claude Code stays on the account it started with. To move to another one, leave and come back on it:
+
+```sh
+/exit                 # in Claude Code
+ccp sw 2              # the same conversation (the last one in this folder) continues on account #2
+ccp sw work -- --resume   # or pick a conversation
+```
+
+Nothing is lost: conversation history is shared between profiles. Inside Claude Code, `! ccp ls` shows the accounts and
+`! ccp use 2` makes the next start use #2.
+
+To always see which account you are on, put `ccp prompt` in Claude Code's status line (`~/.claude/settings.json`):
+
+```json
+{ "statusLine": { "type": "command", "command": "ccp prompt" } }
+```
+
+It prints `#2 work` for the account the session runs on, or add `$(ccp prompt)` to a status line script you already have.
 
 ## How it works
 

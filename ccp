@@ -10,7 +10,7 @@
 #
 # Works with bash 3.2 (stock macOS). https://github.com/yuna-studio/claude-profiles  ·  MIT
 set -u
-VERSION="0.2.0"
+VERSION="0.3.0"
 CCP_HOME="${CCP_HOME:-$HOME/.claude-profiles}"
 BASE="${CCP_BASE:-$HOME/.claude}"   # the default profile's folder: what other profiles share from
 TAB="$(printf '\t')"
@@ -285,8 +285,17 @@ cmd_run() {   # ccp run [-p number|name] [--] [claude args...]
   [ "${1:-}" = -- ] && shift
   [ -n "$want" ] || want="$(resolve . | cut -f1)"
   local id c; id="$(need "$want")" || exit 1; c="$(real_claude)" || exit 1
+  export CCP_ACTIVE="$id"   # what is running, for `ccp prompt` in Claude Code's status line
   if [ "$id" = default ]; then unset CLAUDE_CONFIG_DIR; exec "$c" "$@"; fi
   CLAUDE_CONFIG_DIR="$(pdir "$id")" exec "$c" "$@"
+}
+
+cmd_sw() {   # ccp sw <number|name> [claude args]: the same conversation, now on that account
+  [ -n "${1:-}" ] || die "usage: ccp sw <number|name> [claude args]   (continues the last conversation in this folder)"
+  local want="$1"; shift
+  [ "${1:-}" = -- ] && shift
+  [ $# -gt 0 ] || set -- --continue
+  cmd_run -p "$want" -- "$@"
 }
 
 cmd_rm() {
@@ -323,9 +332,11 @@ EOF
   esac
 }
 
-cmd_prompt() {   # profile for a prompt or status line ("#2" or "#2 work"); empty for the default profile
-  local id; id="$(resolve . 2>/dev/null | cut -f1)"; id="$(ref "$id" 2>/dev/null)" || return 0
-  [ "$id" = default ] || printf '%s' "$(label "$id")"
+cmd_prompt() {   # inside Claude Code: the account it runs on ("#2 work"); in a shell: the one `claude` would use here
+  local id
+  if [ -n "${CCP_ACTIVE:-}" ]; then id="$(ref "$CCP_ACTIVE" 2>/dev/null)" && printf '%s' "$(label "$id")"; return 0; fi
+  id="$(resolve . 2>/dev/null | cut -f1)"; id="$(ref "$id" 2>/dev/null)" || return 0
+  [ "$id" = default ] || printf '%s' "$(label "$id")"   # a shell prompt stays quiet on #1
 }
 
 usage() {
@@ -340,11 +351,12 @@ ccp $VERSION — several Claude Code accounts on one computer, no logging in aga
   ccp mv <n|name> <N>           move a profile to number N
   ccp which [dir]               which profile a claude run here would use, and why
   ccp run [-p n|name] [-- args] run Claude Code with the profile for here (or -p)
+  ccp sw <n|name>               switch: continue the last conversation in this folder on account n (after /exit)
   ccp env [n|name]              eval "\$(ccp env 2)": pin this shell to a profile
   ccp login <n|name>            sign a profile in again
   ccp rm <n|name> [--yes]       sign out and delete a profile
   ccp init zsh|bash             add  eval "\$(ccp init zsh)"  to ~/.zshrc: plain \`claude\` follows the rules
-  ccp prompt                    "#2" for a prompt or status line (empty for the default profile)
+  ccp prompt                    "#2 work" for Claude Code's status line or your shell prompt
 
 #1 is your normal ~/.claude. Order: CCP_PROFILE > folder rule > ccp use > #1. Profiles live in $CCP_HOME.
 EOF
@@ -362,6 +374,7 @@ main() {
     which) cmd_which "$@" ;;
     env) cmd_env "$@" ;;
     run) cmd_run "$@" ;;
+    sw|switch) cmd_sw "$@" ;;
     rm|remove) cmd_rm "$@" ;;
     init) cmd_init "$@" ;;
     prompt) cmd_prompt ;;
