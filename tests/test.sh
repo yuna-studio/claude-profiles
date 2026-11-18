@@ -145,6 +145,8 @@ class H(http.server.BaseHTTPRequestHandler):
                                             {"kind": "weekly_scoped", "percent": 0, "resets_at": "2099-01-01T00:00:00+00:00", "scope": {"model": {"display_name": "Fable"}}}],
                                  "five_hour": {"utilization": 91.0, "resets_at": "2099-01-01T00:00:00Z"}},
                 "Bearer tok-3": {"seven_day": {"utilization": 12.0, "resets_at": "2099-01-01T00:00:00Z"}}}.get(tok)
+        if tok == "Bearer tok-busy":
+            self.send_response(429); self.end_headers(); return
         if self.headers.get("anthropic-beta") != "oauth-2025-04-20" or body is None:
             self.send_response(401); self.end_headers(); return
         self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(body).encode())
@@ -190,6 +192,12 @@ ok "watch: keeps what it saw for ccp service status" 'grep -q "^default	5-hour 9
 out="$(ccp watch --once --at 95)"
 ok "watch: goes back once the first account has room" 'has "$out" "#1 me@x.com has room again" && [ ! -e "$P/default" ] && [ ! -e "$P/moved" ] && [ ! -s "$P/full" ]'
 ok "watch: quiet when nothing changes" '[ -z "$(ccp watch --once --at 95)" ]'
+cp "$P/acct-4/.credentials.json" "$T/cred4"
+echo "{\"claudeAiOauth\":{\"accessToken\":\"tok-busy\",\"expiresAt\":$future}}" > "$P/acct-4/.credentials.json"
+ccp watch --once --at 95 >/dev/null
+ok "watch: 'asked too often' keeps the last numbers and asks less often" 'grep -q "^acct-4	week 12%	wk:12:" "$P/seen" && [ "$(cat "$P/backoff")" = 120 ]'
+cp "$T/cred4" "$P/acct-4/.credentials.json"; ccp watch --once --at 95 >/dev/null
+ok "watch: back to the usual pace once it answers" '[ ! -e "$P/backoff" ]'
 ccp watch --once --at 10 >/dev/null
 ok "watch: an expired sign-in still has room (Claude Code renews it on start)" '[ "$(cat "$P/default")" = acct-5 ] && [ "$(cat "$P/moved")" = default ]'
 ccp use 1 >/dev/null

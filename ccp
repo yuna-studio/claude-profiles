@@ -594,7 +594,7 @@ check_auto() {   # check_auto <at> <every>: the numbers ccp watch takes
 }
 
 cmd_watch() {   # ccp watch [--at PERCENT] [--every SECONDS] [--once]: what `ccp service` keeps running
-  local at every once=0
+  local at every once=0 b
   at="$(auto_get at)"; every="$(auto_get every)"
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -614,7 +614,8 @@ cmd_watch() {   # ccp watch [--at PERCENT] [--every SECONDS] [--once]: what `ccp
     CCP_ROWS="$(usage_rows)" CCP_BASE_DIR="$BASE" CCP_VERSION="$VERSION" CCP_HOME_DIR="$CCP_HOME" CCP_AT="$at" \
       python3 -c "$USAGE_PY" watch "$every"
     [ "$once" = 1 ] && return 0
-    sleep "$every"
+    b="$(cat "$CCP_HOME/backoff" 2>/dev/null)"; case "$b" in ""|*[!0-9]*) b=0 ;; esac
+    if [ "$b" -gt "$every" ]; then sleep "$b"; else sleep "$every"; fi   # the usage endpoint asked for less
   done
 }
 
@@ -954,11 +955,24 @@ def watch():
 
     full = {r["id"]: blocking(r) for r in results if blocking(r)}
     write("full", "".join(f"{i}\t{l['name']}\t{l['used']:.0f}\t{int(l['resets'] or 0)}\n" for i, l in full.items()))
+    before = {}   # the last good line per account: a passing hiccup (asked too often, offline) keeps it
+    for line in read("seen").splitlines():
+        f = line.split("\t")
+        if len(f) >= 3 and f[2]:
+            before[f[0]] = line + "\n"
+    def transient(r):
+        return r["error"] and not r["error"].startswith(("not logged in", "sign-in expired"))
     def seen(r):   # id, what a person reads (ccp service status), then name:used:resets for the status line
+        if transient(r) and r["id"] in before:
+            return before[r["id"]]
         ls = [l for l in r["limits"] if l["name"] in ("5-hour", "week")]
         text = r["error"] or ", ".join(f"{l['name']} {l['used']:.0f}%" for l in ls) or "no limits reported"
         return f"{r['id']}\t{text}\t" + " ".join(f"{'5h' if l['name'] == '5-hour' else 'wk'}:{l['used']:.0f}:{int(l['resets'] or 0)}" for l in ls) + "\n"
     write("seen", "".join(seen(r) for r in results))   # what this check saw
+    if any((r["error"] or "").startswith("asked too often") for r in results):   # back off: ask half as often, up to 10 min
+        write("backoff", str(min(600, max(int(read("backoff") or 0), EVERY) * 2)))
+    else:
+        remove("backoff")
 
     def name(i):
         r = by[i]
@@ -1219,6 +1233,24 @@ status_line() {   # status_line <id of this session>: every account with its lim
   printf '%s' "${out}"
 }
 
+accounts_tsv() {   # accounts_tsv <id of this session>: the plugin's account row reads this; "#hint" first, then one line per
+                  # account: number, id, 1 for this session's, its limits in short
+  local w5="5h" ww="wk" hint="switch: ctrl+x tab, arrows, Enter" fresh=0 id i=0 text detail tok name rest used
+  case "${CCP_LANG:-${LC_ALL:-${LANG:-}}}" in ko*) w5="5시간"; ww="주간"; hint="계정 바꾸기: ctrl+x tab, 방향키, Enter" ;; esac
+  [ -n "$(find "$CCP_HOME/seen" -mmin -15 2>/dev/null)" ] && fresh=1
+  printf '#hint\t%s\n' "$hint"
+  for id in $(ids); do
+    i=$((i + 1)); text=""; detail=""
+    [ "$fresh" = 1 ] && detail="$(awk -F '\t' -v id="$id" '$1 == id { print $3; exit }' "$CCP_HOME/seen")"
+    for tok in $detail; do
+      name="${tok%%:*}"; rest="${tok#*:}"; used="${rest%%:*}"
+      case "$name" in 5h) name="$w5" ;; *) name="$ww" ;; esac
+      text="${text}${text:+ }${name} ${used}%"
+    done
+    printf '%s\t%s\t%s\t%s\n' "$i" "$id" "$( [ "$id" = "${1:-}" ] && echo 1 || echo 0)" "$text"
+  done
+}
+
 cmd_prompt() {   # ccp prompt [--usage]: inside Claude Code the account it runs on ("#2 work"), in a shell the one `claude` would use
                  # here; --usage lists every account with its limits, for Claude Code's status line
   local id="" inside=0
@@ -1228,6 +1260,7 @@ cmd_prompt() {   # ccp prompt [--usage]: inside Claude Code the account it runs 
     case "${CLAUDE_CONFIG_DIR:-}" in "") id=default ;; "$CCP_HOME"/*) id="$(ref "$(basename "$CLAUDE_CONFIG_DIR")" 2>/dev/null)" ;; esac
   else id="$(resolve . 2>/dev/null | cut -f1)"; id="$(ref "$id" 2>/dev/null)"; fi
   if [ "${1:-}" = --usage ]; then status_line "$id"; return 0; fi
+  if [ "${1:-}" = --tsv ]; then accounts_tsv "$id"; return 0; fi
   [ -n "$id" ] || return 0
   if [ "$inside" = 1 ] || [ "$id" != default ]; then printf '%s' "$(label "$id")"; fi   # a shell prompt stays quiet on #1
 }
