@@ -295,12 +295,16 @@ EOF
 
 readopt() {   # background sessions take the new login at once: Claude Code's daemon reads it when it starts and hands it to
               # each session it adopts, and `daemon stop --keep-workers` leaves them running (a terminal session: supervise)
-  local c; c="$(real_claude 2>/dev/null)" || return 0
+  local c n; c="$(real_claude 2>/dev/null)" || return 0
   (
     unset CLAUDE_CONFIG_DIR
     "$c" daemon status 2>/dev/null | grep -q '^pid:' || exit 0
     if ! "$c" daemon stop --any --keep-workers >/dev/null 2>&1; then say "background sessions take it when they next renew their sign-in"; exit 0; fi
-    "$c" agents --json >/dev/null 2>&1   # starts the daemon again; it adopts the sessions that kept running
+    "$c" agents --json >/dev/null 2>&1   # starts the daemon again (it comes up a few seconds later) and it adopts the sessions
+    n=0; until "$c" daemon status 2>/dev/null | grep -q '^pid:'; do
+      n=$((n + 1)); [ "$n" -lt "${CCP_DAEMON_WAIT:-45}" ] || { say "background sessions take it once Claude Code's daemon is back (claude agents starts it)"; exit 0; }
+      sleep 1; [ $((n % 10)) = 0 ] && "$c" agents --json >/dev/null 2>&1
+    done
     say "background sessions took it too (they kept running)"
   )
   return 0
