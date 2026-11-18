@@ -473,13 +473,17 @@ cmd__move() {   # ccp _move <from> <to> <pid> <sessionId> <short id> <cwd>: what
     n=$((n + 1)); [ "$n" -lt 3600 ] || { say "  still busy after an hour; left it on $(label "$from")"; return 1; }
     sleep 1
   done
+  if ! ls "$BASE"/projects/*/"$sid".jsonl >/dev/null 2>&1; then   # nothing saved yet: there is no conversation to continue
+    say "  no conversation saved yet; nothing to move"; return 1
+  fi
   trust_dir "$from" "$to" "$cwd"
   cd "$cwd" 2>/dev/null || cd "$HOME" || exit 1
   with_profile "$from" "$c" stop "$short" >/dev/null 2>&1
   n=0; while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 20 ]; do sleep 1; n=$((n + 1)); done
   if kill -0 "$pid" 2>/dev/null; then say "  could not stop it; left it on $(label "$from")"; return 1; fi   # never two copies
   # no launch flags: with flags Claude Code starts a copy under a new id instead of continuing this one
-  if out="$(with_profile "$to" "$c" --bg --resume "$sid" 2>&1)" && printf '%s' "$out" | grep -q 'backgrounded'; then
+  if out="$(with_profile "$to" "$c" --bg --resume "$sid" 2>&1)" && printf '%s' "$out" | grep -q 'backgrounded' \
+     && started_on "$to" "$short"; then
     printf '%s\t%s\t%s\n' "$to" "$short" "$(date +%s)" > "$CCP_HOME/attach.$$" && mv "$CCP_HOME/attach.$$" "$CCP_HOME/attach"
     with_profile "$from" "$c" rm "$short" >/dev/null 2>&1   # the old account's agent view would start it again there
     say "  now on $(label "$to")"
@@ -489,6 +493,21 @@ cmd__move() {   # ccp _move <from> <to> <pid> <sessionId> <short id> <cwd>: what
   say "  could not start it on $(label "$to"): $(printf '%s' "$out" | tail -1); back on $(label "$from")"
   with_profile "$from" "$c" --bg --resume "$sid" >/dev/null 2>&1
   notify "Could not move session $short to $(label "$to"); it stays on $(label "$from")"
+  return 1
+}
+
+started_on() {   # started_on <id> <short id>: the session came up on that account (Claude Code says "backgrounded" first)
+  local n=0 st c; c="$(real_claude)" || return 1
+  while [ "$n" -lt 30 ]; do
+    st="$(with_profile "$1" "$c" agents --json --all 2>/dev/null | python3 -c 'import json, sys
+try: rows = json.load(sys.stdin)
+except Exception: rows = []
+for x in rows:
+    if x.get("id") == sys.argv[1]:
+        print("failed" if x.get("state") == "failed" else (x.get("status") or "")); break' "$2")"
+    case "$st" in failed) return 1 ;; ?*) return 0 ;; esac
+    sleep 1; n=$((n + 1))
+  done
   return 1
 }
 
