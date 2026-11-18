@@ -483,7 +483,7 @@ EOF
       ;;
     stop)
       "$lc" bootout "$dom/$AGENT" >/dev/null 2>&1 || true
-      rm -f "$plist" "$CCP_HOME/auto" "$CCP_HOME/full" "$CCP_HOME/moved" "$CCP_HOME/stuck"
+      rm -f "$plist" "$CCP_HOME/auto" "$CCP_HOME/full" "$CCP_HOME/seen" "$CCP_HOME/moved" "$CCP_HOME/stuck"
       say "stopped; new sessions keep using $(label "$(ref "$(cat "$CCP_HOME/default" 2>/dev/null || echo default)" || echo default)")"
       ;;
     status)
@@ -495,6 +495,10 @@ EOF
       [ -s "$CCP_HOME/moved" ] && exists "$(cat "$CCP_HOME/moved")" && say "moved from $(label "$(cat "$CCP_HOME/moved")"); goes back when it has room"
       if watching; then
         local fid fname fused freset
+        if [ -s "$CCP_HOME/seen" ]; then
+          say "last check $(date -r "$CCP_HOME/seen" '+%H:%M:%S' 2>/dev/null || date -d "@$(stat -c %Y "$CCP_HOME/seen")" '+%H:%M:%S'):"
+          while IFS="$TAB" read -r fid fname; do [ -n "$fid" ] && exists "$fid" && say "  $(label "$fid"): $fname"; done < "$CCP_HOME/seen"
+        fi
         while IFS="$TAB" read -r fid fname fused freset; do
           [ -n "$fid" ] && exists "$fid" && say "full: $(label "$fid") at ${fused}% of its $fname limit$( [ "${freset:-0}" -gt 0 ] 2>/dev/null && printf ' until %s' "$(date -r "$freset" '+%m-%d %H:%M' 2>/dev/null || date -d "@$freset" '+%m-%d %H:%M' 2>/dev/null)")"
         done < "$CCP_HOME/full"
@@ -758,6 +762,9 @@ def watch():
 
     full = {r["id"]: blocking(r) for r in results if blocking(r)}
     write("full", "".join(f"{i}\t{l['name']}\t{l['used']:.0f}\t{int(l['resets'] or 0)}\n" for i, l in full.items()))
+    write("seen", "".join(f"{r['id']}\t" + (r["error"] or ", ".join(f"{l['name']} {l['used']:.0f}%" for l in r["limits"]
+                                                                   if l["name"] in ("5-hour", "week")) or "no limits reported") + "\n"
+                          for r in results))   # what this check saw, for ccp service status
 
     def name(i):
         r = by[i]

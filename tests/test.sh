@@ -173,6 +173,7 @@ export CCP_NO_NOTIFY=1
 out="$(ccp watch --once --at 90)"
 ok "watch: a full account hands new sessions to the next one with room" 'has "$out" "#1 me@x.com is at 91% of its 5-hour limit" && has "$out" "New Claude Code sessions use #3 four@x.com" && [ "$(cat "$P/default")" = acct-4 ] && [ "$(cat "$P/moved")" = default ]'
 ok "watch: lists full accounts for running sessions" 'grep -q "^default	5-hour	91	" "$P/full"'
+ok "watch: keeps what it saw for ccp service status" 'grep -q "^default	5-hour 91%, week 48%$" "$P/seen" && grep -q "^acct-3	not logged in$" "$P/seen" && has "$(ccp service status)" "  #1 default: 5-hour 91%, week 48%"'
 out="$(ccp watch --once --at 95)"
 ok "watch: goes back once the first account has room" 'has "$out" "#1 me@x.com has room again" && [ ! -e "$P/default" ] && [ ! -e "$P/moved" ] && [ ! -s "$P/full" ]'
 ok "watch: quiet when nothing changes" '[ -z "$(ccp watch --once --at 95)" ]'
