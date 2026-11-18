@@ -356,8 +356,33 @@ cmd__respawn() {   # ccp _respawn <pid> <short id>: wait until that background s
     sleep 1
   done
   kill -0 "$pid" 2>/dev/null || return 0   # it ended on its own
+  keep_name "$short" "$pid"
   if (unset CLAUDE_CONFIG_DIR; "$c" respawn "$short") >/dev/null 2>&1; then say "$(date '+%F %T') $short: restarted in place on $(label "$(holder)")'s login"
   else say "$(date '+%F %T') $short: claude respawn failed; it switches when its token runs out"; fi
+}
+
+keep_name() {   # keep_name <short id> <pid>: claude respawn starts a session from its launch options, so its name goes in them
+  python3 - "$BASE/jobs/$1/state.json" "$BASE/sessions/$2.json" "$1" <<'PY' 2>/dev/null || true
+import json, os, sys
+state, record, short = sys.argv[1:]
+d = json.load(open(state))
+name = d.get("name")
+if not name:
+    try:
+        r = json.load(open(record))
+        name = r.get("name") if r.get("name") and r.get("name") != short else None
+    except Exception:
+        name = None
+flags = list(d.get("respawnFlags") or [])
+if not name or "--name" in flags:
+    sys.exit(0)
+d["respawnFlags"] = flags + ["--name", name]
+d.setdefault("name", name)
+tmp = state + ".ccp-tmp"
+with open(tmp, "w") as f:
+    json.dump(d, f, indent=2, ensure_ascii=False)
+os.replace(tmp, state)
+PY
 }
 
 job_busy() {   # job_busy <config folder> <short id>: the background job still runs work it started (a build, a shell); watches

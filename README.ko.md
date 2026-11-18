@@ -37,7 +37,7 @@ brew tap yuna-studio/claude-profiles https://github.com/yuna-studio/claude-profi
 brew install ccp
 ```
 
-Claude Code 플러그인(Claude 안에서 `/ccp:usage` · `/ccp:accounts` · `/ccp:use` · `/ccp:switch` · `/ccp:auto`, 그리고 `ccp` 명령):
+Claude Code 플러그인(Claude 안에서 `/ccp:usage` · `/ccp:accounts` · `/ccp:use` · `/ccp:switch` · `/ccp:auto` · `/ccp:add`, 그리고 `ccp` 명령):
 
 ```
 /plugin install ccp --marketplace yuna-studio/claude-profiles

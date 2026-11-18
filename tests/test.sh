@@ -268,10 +268,12 @@ STUB_KIND=bg STUB_SID=cccc0000-4444 STUB_TICKS=60 "$CCP_CLAUDE" --stay > "$T/bg.
 IDLE=$!
 STUB_KIND=bg STUB_SID=dddd0000-5555 STUB_STATUS=busy STUB_TICKS=25 "$CCP_CLAUDE" --stay > "$T/bg2.out" 2>&1 &
 BUSY=$!; sleep 0.3
+mkdir -p "$HOME/.claude/jobs/cccc0000"; echo '{"name": "my job", "nameSource": "user", "respawnFlags": ["--model", "m"]}' > "$HOME/.claude/jobs/cccc0000/state.json"
 printf '[{"pid": %s, "id": "cccc0000", "kind": "background", "status": "idle"}, {"pid": %s, "id": "dddd0000", "kind": "background", "status": "busy"}, {"pid": 999999, "id": "eeee0000", "kind": "background"}]\n' "$IDLE" "$BUSY" > "$HOME/.claude/stub-agents.json"
 out="$(ccp use 3)"
 i=0; while ! grep -q "^respawn cccc0000" "$HOME/stub.log" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
 ok "use: running background sessions restart in place once idle (claude respawn keeps id and conversation)" 'has "$out" "2 running background session(s) restart in place once idle" && grep -q "^respawn cccc0000 CONFIG=unset$" "$HOME/stub.log"'
+ok "use: its name goes in its launch options first, so the restart keeps it" 'grep -q "\"--name\"" "$HOME/.claude/jobs/cccc0000/state.json" && grep -q "my job" "$HOME/.claude/jobs/cccc0000/state.json" && grep -q "\"--model\"" "$HOME/.claude/jobs/cccc0000/state.json"'
 ok "use: a busy one is never cut short, a closed one is left alone" '! grep -q "dddd0000\|eeee0000" "$HOME/stub.log"'
 ok "use: asked again, a session still waiting gets no second waiter" 'has "$(ccp use 3)" "1 running background session(s)"'
 wait "$BUSY" 2>/dev/null; i=0; while [ -d "$P/respawning/dddd0000" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done

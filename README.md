@@ -42,7 +42,7 @@ brew tap yuna-studio/claude-profiles https://github.com/yuna-studio/claude-profi
 brew install ccp
 ```
 
-As a Claude Code plugin (adds `/ccp:usage`, `/ccp:accounts`, `/ccp:use`, `/ccp:switch`, `/ccp:auto`, and `ccp` inside Claude Code):
+As a Claude Code plugin (adds `/ccp:usage`, `/ccp:accounts`, `/ccp:use`, `/ccp:switch`, `/ccp:auto`, `/ccp:add`, and `ccp` inside Claude Code):
 
 ```
 /plugin install ccp --marketplace yuna-studio/claude-profiles
