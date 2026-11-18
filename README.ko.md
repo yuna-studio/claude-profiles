@@ -37,7 +37,7 @@ brew tap yuna-studio/claude-profiles https://github.com/yuna-studio/claude-profi
 brew install ccp
 ```
 
-Claude Code 플러그인(Claude 안에서 `/ccp:usage` · `/ccp:accounts` · `/ccp:use` · `/ccp:switch` · `/ccp:auto` · `/ccp:add`, 그리고 `ccp` 명령):
+Claude Code 플러그인(Claude 안에서 `/ccp:usage` · `/ccp:accounts` · `/ccp:use` · `/ccp:switch` · `/ccp:auto` · `/ccp:config` · `/ccp:add`, 그리고 `ccp` 명령):
 
 ```
 /plugin install ccp --marketplace yuna-studio/claude-profiles
@@ -130,6 +130,18 @@ ccp service stop
 99%(`--at`)에 닿으면, `ccp use` 처럼 여유 있는 다음 계정의 로그인을 `~/.claude` 에 넣고 알림을 띄워요. 처음 계정에 여유가 다시
 생기면(보관 중이면 그 한도의 리셋 시각이 지나면) 그 로그인으로 돌아가요. 세션은 위처럼 그 자리에 그대로 있고, 일하는 중인 세션
 (답하는 중 · 도구 실행 중 · 질문 중)은 끊지 않아요.
+
+설정은 모두 기본으로 켜져 있어요(Claude Code 안에선 `/ccp:config`).
+
+```sh
+ccp config                     # 보기
+ccp config at 95               # 99% 대신 95%에서 넘기기
+ccp config respawn off         # 넘긴 뒤 돌던 세션을 다시 띄우지 않기(들고 있는 토큰이 끝날 때까지 그대로)
+ccp config continue off        # 한도로 끊긴 세션이 저절로 이어가지 않고 입력을 기다리기
+```
+
+`continue` 가 켜져 있으면, 답하는 중에 한도로 끊긴 세션을 새 계정으로 그 자리에서 다시 띄운 뒤, 세션끼리 메시지를 주고받는
+로컬 소켓으로 「이어서 계속해 주세요」를 보내요. 세션은 그걸 팀원의 요청으로 받아 하던 일을 이어가요.
 
 Linux 에서는 `ccp watch` 를 systemd `--user` 나 tmux 로 띄워 두세요. 기록은 `~/.claude-profiles/watch.log` 에 남아요.
 

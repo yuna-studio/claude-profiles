@@ -42,7 +42,7 @@ brew tap yuna-studio/claude-profiles https://github.com/yuna-studio/claude-profi
 brew install ccp
 ```
 
-As a Claude Code plugin (adds `/ccp:usage`, `/ccp:accounts`, `/ccp:use`, `/ccp:switch`, `/ccp:auto`, `/ccp:add`, and `ccp` inside Claude Code):
+As a Claude Code plugin (adds `/ccp:usage`, `/ccp:accounts`, `/ccp:use`, `/ccp:switch`, `/ccp:auto`, `/ccp:config`, `/ccp:add`, and `ccp` inside Claude Code):
 
 ```
 /plugin install ccp --marketplace yuna-studio/claude-profiles
@@ -160,6 +160,19 @@ Every minute it reads each account's usage (as `ccp top` does). When the account
 holds) reaches 99% (`--at`) of its 5-hour or weekly limit, `~/.claude` takes the login of the next account with room, as with
 `ccp use`, and it shows a notification. When the first account has room again (or, kept aside, its limit has reset),
 its login goes back. Sessions stay where they are, as above; a busy one (a turn, a tool, a question) is never cut short.
+
+Settings, all on by default (`/ccp:config` inside Claude Code):
+
+```sh
+ccp config                     # show them
+ccp config at 95               # switch at 95% instead of 99%
+ccp config respawn off         # after a switch, running sessions keep their token until it runs out (no restart)
+ccp config continue off        # a session the limit cut off waits for you instead of going on by itself
+```
+
+With `continue` on, a session that the limit cut off mid-answer is restarted in place on the new account and then asked to
+go on, through its own inbox (the local socket Claude Code sessions message each other on); it reads the request as a
+teammate's and picks the work up again.
 
 Elsewhere (Linux), keep `ccp watch` running under systemd `--user` or tmux. The log is `~/.claude-profiles/watch.log`.
 

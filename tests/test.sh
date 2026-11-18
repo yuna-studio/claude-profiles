@@ -22,7 +22,8 @@ case "${1:-}" in   # background sessions: stop, --bg --resume, agents
   --bg) case "${CLAUDE_CONFIG_DIR:-}" in *acct-5) echo "Workspace not trusted"; exit 1 ;; esac
         echo "bg-resume $3 CONFIG=${CLAUDE_CONFIG_DIR:-unset} FLAGS=${*:4}" >> "$HOME/stub.log"; echo "${3%%-*}" >> "$cfg/stub-agents"
         echo "backgrounded · ${3%%-*}"; exit 0 ;;
-  respawn) echo "respawn $2 CONFIG=${CLAUDE_CONFIG_DIR:-unset}" >> "$HOME/stub.log"; exit 0 ;;
+  respawn) echo "respawn $2 CONFIG=${CLAUDE_CONFIG_DIR:-unset}" >> "$HOME/stub.log"
+           [ -f "$cfg/respawn-$2.sh" ] && /bin/bash "$cfg/respawn-$2.sh"; exit 0 ;;   # a test's own: the same session, a new process
   daemon) echo "daemon ${*:2} CONFIG=${CLAUDE_CONFIG_DIR:-unset}" >> "$HOME/stub.log"
           [ "${2:-}" = status ] && [ -f "$HOME/daemon-up" ] && echo "pid:     4242"; exit 0 ;;
   agents) echo "agents CONFIG=${CLAUDE_CONFIG_DIR:-unset}" >> "$HOME/stub.log"
@@ -32,7 +33,8 @@ case "${1:-}" in   # background sessions: stop, --bg --resume, agents
 esac
 if [ "${1:-}" = --stay ]; then   # a session that stays open, with the record Claude Code keeps for it, until it is ended
   mkdir -p "$cfg/sessions"
-  printf '{"pid": %s, "sessionId": "%s", "status": "%s", "kind": "%s", "cwd": "%s"}\n' "$$" "${STUB_SID:-sid-1}" "${STUB_STATUS:-idle}" "${STUB_KIND:-interactive}" "$PWD" > "$cfg/sessions/$$.json"
+  sock=""; if [ -n "${STUB_SOCK:-}" ]; then sock=", \"messagingSocketPath\": \"$STUB_SOCK\""; echo '{"peerToken": "tok-peer"}' > "$cfg/sessions/$$.k.key"; fi
+  printf '{"pid": %s, "sessionId": "%s", "status": "%s", "kind": "%s", "cwd": "%s"%s}\n' "$$" "${STUB_SID:-sid-1}" "${STUB_STATUS:-idle}" "${STUB_KIND:-interactive}" "$PWD" "$sock" > "$cfg/sessions/$$.json"
   echo "$$" > "$cfg/stub-bg.pid"
   trap 'echo "TERM CONFIG=${CLAUDE_CONFIG_DIR:-unset}"; rm -f "$cfg/sessions/$$.json"; exit 143' TERM
   [ -n "${STUB_RUN:-}" ] && ( sleep 0.3; export CLAUDECODE=1; eval "$STUB_RUN" > "$HOME/stub-run.out" 2>&1 ) &   # a command run inside it
@@ -279,6 +281,57 @@ ok "use: asked again, a session still waiting gets no second waiter" 'has "$(ccp
 wait "$BUSY" 2>/dev/null; i=0; while [ -d "$P/respawning/dddd0000" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
 ok "use: a session that ends while it waits is not started again, and its waiter lets go" '! grep -q "dddd0000" "$HOME/stub.log" && [ ! -d "$P/respawning/dddd0000" ]'
 kill "$IDLE" 2>/dev/null; wait "$IDLE" 2>/dev/null; rm -f "$HOME/.claude/stub-agents.json"; ccp use 1 >/dev/null
+ok "use: a restart that the limit did not cut off sends nothing" '! grep -q "asked it to go on" "$P/respawn.log" 2>/dev/null'
+
+# continue: a session the usage limit cut off goes on by itself after its restart, through its inbox socket
+cat > "$T/uds.py" <<'EOF'
+import os, socket, sys
+path, out = sys.argv[1:]
+s = socket.socket(socket.AF_UNIX); s.bind(path); s.listen(1); s.settimeout(40)
+c, _ = s.accept(); c.settimeout(5); data = b""
+while True:
+    b = c.recv(4096)
+    if not b:
+        break
+    data += b
+open(out, "wb").write(data)
+EOF
+rm -rf "$P/respawning"; rm -f "$HOME/stub.log" "$T/peer.out"; SOCK="$T/p.sock"
+python3 "$T/uds.py" "$SOCK" "$T/peer.out" & UDS=$!
+mkdir -p "$HOME/.claude/projects/-home"
+{ echo '{"type":"user","message":{"role":"user","content":"build it"}}'
+  echo '{"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","message":{"role":"assistant","content":[{"type":"text","text":"You have hit your limit"}]}}'; } > "$HOME/.claude/projects/-home/ffff1111-0000.jsonl"
+STUB_KIND=bg STUB_SID=ffff1111-0000 STUB_TICKS=150 "$CCP_CLAUDE" --stay > "$T/c1.out" 2>&1 &
+OLD=$!; sleep 0.3
+printf '[{"pid": %s, "id": "ffff1111", "kind": "background", "status": "idle"}]\n' "$OLD" > "$HOME/.claude/stub-agents.json"
+cat > "$HOME/.claude/respawn-ffff1111.sh" <<EOF
+kill $OLD
+STUB_KIND=bg STUB_SID=ffff1111-0000 STUB_SOCK="$SOCK" STUB_TICKS=150 "$CCP_CLAUDE" --stay > "$T/c2.out" 2>&1 &
+sleep 0.3; printf '[{"pid": %s, "id": "ffff1111", "kind": "background", "status": "idle"}]\n' \$! > "$HOME/.claude/stub-agents.json"
+EOF
+ccp use 3 >/dev/null
+i=0; while [ ! -s "$T/peer.out" ] && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
+ok "continue: after the restart it asks the cut-off session to go on, signed in to its inbox" 'grep -q "\"type\": \"auth\", \"token\": \"tok-peer\"" "$T/peer.out" && grep -q "continue where you left off" "$T/peer.out"'
+i=0; while ! grep -q "asked it to go on" "$P/respawn.log" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+ok "continue: and says so in the log" 'grep -q "ffff1111: the limit had cut it off; asked it to go on" "$P/respawn.log"'
+pkill -f "STUB_SID=ffff1111" 2>/dev/null; kill "$UDS" 2>/dev/null; wait "$UDS" 2>/dev/null
+for p in $(cat "$HOME/.claude/stub-agents.json" | python3 -c 'import json,sys;[print(x["pid"]) for x in json.load(sys.stdin)]'); do kill "$p" 2>/dev/null; done
+rm -f "$HOME/.claude/stub-agents.json" "$HOME/.claude/respawn-ffff1111.sh"; ccp use 1 >/dev/null
+
+# ccp config: when to switch, whether sessions restart, whether a cut-off one goes on; all on by default
+out="$(ccp config)"
+ok "config: every setting on by default, switching at 99%" 'has "$out" "at        99%" && has "$out" "respawn   on" && has "$out" "continue  on"'
+ccp config at 95 >/dev/null; ccp config continue off >/dev/null
+ok "config: set one by one, read back" '[ "$(ccp config at)" = 95 ] && [ "$(ccp config continue)" = off ] && [ "$(ccp config respawn)" = on ]'
+ok "config: refuses odd values" '! ccp config at 0 2>/dev/null && ! ccp config at 101 2>/dev/null && ! ccp config respawn maybe 2>/dev/null && ! ccp config nope 1 2>/dev/null'
+ccp config respawn off >/dev/null
+STUB_KIND=bg STUB_SID=cccc0000-4444 STUB_TICKS=30 "$CCP_CLAUDE" --stay > "$T/bg.out" 2>&1 &
+IDLE=$!; sleep 0.3; rm -f "$HOME/stub.log"
+printf '[{"pid": %s, "id": "cccc0000", "kind": "background", "status": "idle"}]\n' "$IDLE" > "$HOME/.claude/stub-agents.json"
+out="$(ccp use 3)"; sleep 1
+ok "config respawn off: running sessions keep their token, none restarts" 'has "$out" "keep the token they hold until it runs out" && ! grep -q "^respawn" "$HOME/stub.log" 2>/dev/null'
+kill "$IDLE" 2>/dev/null; wait "$IDLE" 2>/dev/null; rm -f "$HOME/.claude/stub-agents.json"
+ccp config respawn on >/dev/null; ccp config continue on >/dev/null; ccp config at 99 >/dev/null; ccp use 1 >/dev/null
 rm -f "$P/full"
 
 # the status line: a column per account, a row per limit (a bar in eighths, the percent, time left), as ccp watch saw them
@@ -314,7 +367,7 @@ out="$(ccp service start --at 95 --every 120)"
 ok "service start: a launchd job that keeps ccp watch running" 'grep -q "<string>watch</string>" "$PL" && grep -q "<string>$ROOT/ccp</string>" "$PL" && grep -q "bootstrap gui/" "$HOME/launchctl.log" && has "$out" "reaches 95%"'
 ok "service start: keeps its settings for ccp watch" '[ "$(tr "\n" " " < "$P/auto")" = "at=95 every=120 " ]'
 if command -v plutil >/dev/null 2>&1; then ok "service start: a valid plist" 'plutil -lint "$PL" >/dev/null'; fi
-ok "service status: running, with its settings" 'has "$(ccp service status)" "running (pid 4242), at 95% · every 120s"'
+ok "service status: running, with its settings" 'has "$(ccp service status)" "running (pid 4242), at 95% · every 120s · respawn on · continue on" && [ "$(ccp config at)" = 95 ]'
 ccp service stop >/dev/null
 ok "service stop: unloads it and turns the switching off" '[ ! -e "$PL" ] && [ ! -e "$P/auto" ] && grep -q "bootout gui/" "$HOME/launchctl.log" && has "$(ccp service status)" "service: off"'
 ok "service: refuses odd numbers" '! ccp service start --at 0 2>/dev/null && ! ccp service start --every 5 2>/dev/null'

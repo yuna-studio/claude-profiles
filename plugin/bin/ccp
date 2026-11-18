@@ -318,6 +318,7 @@ readopt() {   # Claude Code's daemon reads the login when it starts and gives it
 respawn_running() {   # one waiter (_respawn) per running background session on ~/.claude
   local c n=0 pid short lock
   [ -n "${CCP_NO_RESPAWN:-}" ] && return 0
+  if [ "$(conf respawn)" != on ]; then say "running sessions keep the token they hold until it runs out (ccp config respawn on restarts them now)"; return 0; fi
   c="$(real_claude 2>/dev/null)" || return 0
   mkdir -p "$CCP_HOME/respawning"
   while IFS="$TAB" read -r pid short; do
@@ -356,9 +357,73 @@ cmd__respawn() {   # ccp _respawn <pid> <short id>: wait until that background s
     sleep 1
   done
   kill -0 "$pid" 2>/dev/null || return 0   # it ended on its own
+  local cut=0 sid; sid="$(session_info "$BASE/sessions/$pid.json" | cut -f1)"
+  if [ "$(conf continue)" = on ] && [ -n "$sid" ] && cut_off "$sid"; then cut=1; fi   # before the restart rewrites anything
   keep_name "$short" "$pid"
-  if (unset CLAUDE_CONFIG_DIR; "$c" respawn "$short") >/dev/null 2>&1; then say "$(date '+%F %T') $short: restarted in place on $(label "$(holder)")'s login"
+  if (unset CLAUDE_CONFIG_DIR; "$c" respawn "$short") >/dev/null 2>&1; then
+    say "$(date '+%F %T') $short: restarted in place on $(label "$(holder)")'s login"
+    if [ "$cut" = 1 ]; then
+      if nudge "$short" "$pid" "$c"; then say "$(date '+%F %T') $short: the limit had cut it off; asked it to go on"
+      else say "$(date '+%F %T') $short: the limit had cut it off; could not reach it to go on (type: continue)"; fi
+    fi
   else say "$(date '+%F %T') $short: claude respawn failed; it switches when its token runs out"; fi
+}
+
+cut_off() {   # cut_off <sessionId>: the last answer in that conversation is the usage-limit error
+  python3 - "$BASE/projects" "$1" <<'PY' 2>/dev/null
+import glob, json, os, sys
+files = glob.glob(os.path.join(sys.argv[1], "*", sys.argv[2] + ".jsonl"))
+last = None
+for line in open(files[0]) if files else []:
+    try:
+        d = json.loads(line)
+    except ValueError:
+        continue
+    if d.get("type") in ("user", "assistant") and not d.get("isMeta"):
+        last = d
+sys.exit(0 if last and last.get("type") == "assistant" and last.get("isApiErrorMessage") and last.get("error") == "rate_limit" else 1)
+PY
+}
+
+nudge() {   # nudge <short id> <old pid> <claude>: once the restarted session is up, ask it to go on, through its own inbox (the
+            # local socket Claude Code sessions message each other on); it comes in as a teammate's request
+  local ko=""; case "${CCP_LANG:-${LC_ALL:-${LANG:-}}}" in ko*) ko=1 ;; esac   # not inside $(…): bash 3.2 misreads a case there
+  CCP_NUDGE_KO="$ko" python3 - "$BASE" "$1" "$2" "$3" <<'PY' 2>/dev/null
+import glob, json, os, socket, subprocess, sys, time
+base, short, old, claude = sys.argv[1:]
+text = ("ccp: 사용 한도에 걸려 끊겼던 작업을 이어서 계속해 주세요. (사용자가 켜 둔 자동 이어하기예요. ccp 가 다른 계정으로 바꾸고 이 세션을 다시 띄웠어요.)"
+        if os.environ.get("CCP_NUDGE_KO") else
+        "ccp: the usage limit cut your last answer short. Please continue where you left off. (Automatic continue, turned on by your user: ccp switched to another account and restarted this session.)")
+env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"}
+end = time.time() + 120
+while time.time() < end:
+    time.sleep(2)
+    try:
+        rows = json.loads(subprocess.run([claude, "agents", "--json", "--all"], capture_output=True, text=True, env=env, timeout=20).stdout)
+        row = next(x for x in rows if x.get("id") == short)
+        pid = str(row.get("pid") or "")
+        if not pid or pid == old or row.get("status") not in ("idle", None):
+            continue
+        rec = json.load(open(os.path.join(base, "sessions", pid + ".json")))
+        if rec.get("status") not in ("idle", None) or not rec.get("messagingSocketPath"):
+            continue
+        key = json.load(open(glob.glob(os.path.join(base, "sessions", pid + ".*.key"))[0]))
+        s = socket.socket(socket.AF_UNIX)
+        s.settimeout(5)
+        s.connect(rec["messagingSocketPath"])
+        s.sendall((json.dumps({"type": "auth", "token": key["peerToken"]}) + "\n").encode())
+        s.sendall((json.dumps({"type": "user", "message": {"role": "user", "content": text}}, ensure_ascii=False) + "\n").encode())
+        s.shutdown(socket.SHUT_WR)
+        try:
+            s.recv(100)
+        except OSError:
+            pass
+        s.close()
+        sys.exit(0)
+    except Exception:
+        continue
+sys.exit(1)
+PY
 }
 
 keep_name() {   # keep_name <short id> <pid>: claude respawn starts a session from its launch options, so its name goes in them
@@ -713,6 +778,41 @@ EOF
 
 auto_get() { sed -n "s/^$1=//p" "$CCP_HOME/auto" 2>/dev/null | head -1; }   # a ccp service setting
 
+conf() {   # conf <key>: a setting from ccp config, or its default (every one is on)
+  local v; v="$(sed -n "s/^$1=//p" "$CCP_HOME/config" 2>/dev/null | tail -1)"
+  [ -n "$v" ] || [ "$1" != at ] || v="$(auto_get at)"
+  if [ -z "$v" ]; then case "$1" in at) v=99 ;; respawn|continue) v=on ;; esac; fi
+  echo "$v"
+}
+
+set_conf() {   # set_conf <key> <value>
+  mkdir -p "$CCP_HOME"; touch "$CCP_HOME/config"
+  { grep -v "^$1=" "$CCP_HOME/config"; echo "$1=$2"; } > "$CCP_HOME/config.$$" && mv "$CCP_HOME/config.$$" "$CCP_HOME/config"
+}
+
+cmd_config() {   # ccp config [at <percent> | respawn on|off | continue on|off]
+  local k="${1:-}" v="${2:-}"
+  if [ -z "$k" ]; then
+    printf '%-9s %-5s %s\n' at "$(conf at)%" "switch to the next account with room at this share of a 5-hour or weekly limit (ccp service)"
+    printf '%-9s %-5s %s\n' respawn "$(conf respawn)" "after a switch, each running background session restarts in place once idle and uses the new login"
+    printf '%-9s %-5s %s\n' continue "$(conf continue)" "a session the limit cut off goes on by itself after that restart"
+    return 0
+  fi
+  case "$k" in
+    at) [ -n "$v" ] || { conf at; return 0; }; v="${v%\%}"; check_auto "$v" 60 ;;
+    respawn|continue) [ -n "$v" ] || { conf "$k"; return 0; }
+      case "$v" in on|off) ;; *) die "config: $k takes on or off" ;; esac ;;
+    *) die "usage: ccp config [at <1-100> | respawn on|off | continue on|off]" ;;
+  esac
+  set_conf "$k" "$v"
+  if [ "$k" = at ] && [ -f "$CCP_HOME/auto" ]; then   # ccp watch reads it on its next check
+    sed "s/^at=.*/at=$v/" "$CCP_HOME/auto" > "$CCP_HOME/auto.$$" && mv "$CCP_HOME/auto.$$" "$CCP_HOME/auto"
+  fi
+  say "$k: $v$( [ "$k" = at ] && echo %)"
+  [ "$k" = continue ] && [ "$v" = on ] && [ "$(conf respawn)" = off ] && say "note: continue works with respawn on"
+  return 0
+}
+
 check_auto() {   # check_auto <at> <every>: the numbers ccp watch takes
   case "$1" in ""|*[!0-9]*) die "--at takes a percent from 1 to 100" ;; esac
   [ "$1" -ge 1 ] && [ "$1" -le 100 ] || die "--at takes a percent from 1 to 100"
@@ -721,8 +821,8 @@ check_auto() {   # check_auto <at> <every>: the numbers ccp watch takes
 }
 
 cmd_watch() {   # ccp watch [--at PERCENT] [--every SECONDS] [--once]: what `ccp service` keeps running
-  local at every once=0 b w
-  at="$(auto_get at)"; every="$(auto_get every)"
+  local at="" every once=0 b w now_at
+  every="$(auto_get every)"
   while [ $# -gt 0 ]; do
     case "$1" in
       --at) shift; at="${1:-}" ;;
@@ -732,13 +832,14 @@ cmd_watch() {   # ccp watch [--at PERCENT] [--every SECONDS] [--once]: what `ccp
     esac
     shift
   done
-  at="${at:-99}"; every="${every:-60}"
-  check_auto "$at" "$every"
+  every="${every:-60}"
+  check_auto "${at:-$(conf at)}" "$every"
   command -v python3 >/dev/null 2>&1 || die "watch needs python3"
   mkdir -p "$CCP_HOME"
-  [ "$once" = 1 ] || say "$(date '+%F %T') ccp $VERSION watching every ${every}s: at ${at}%, ~/.claude takes the login of the next account with room"
+  [ "$once" = 1 ] || say "$(date '+%F %T') ccp $VERSION watching every ${every}s: at ${at:-$(conf at)}%, ~/.claude takes the login of the next account with room"
   while :; do
-    CCP_ROWS="$(usage_rows)" CCP_BASE_DIR="$BASE" CCP_VERSION="$VERSION" CCP_HOME_DIR="$CCP_HOME" CCP_AT="$at" CCP_SLOT="$(holder)" \
+    now_at="${at:-$(conf at)}"   # ccp config at takes effect on the next check
+    CCP_ROWS="$(usage_rows)" CCP_BASE_DIR="$BASE" CCP_VERSION="$VERSION" CCP_HOME_DIR="$CCP_HOME" CCP_AT="$now_at" CCP_SLOT="$(holder)" \
       python3 -c "$USAGE_PY" watch "$every"
     if [ -s "$CCP_HOME/want" ]; then   # the check picked another account: its login goes in ~/.claude
       w="$(cat "$CCP_HOME/want")"; rm -f "$CCP_HOME/want"
@@ -760,7 +861,7 @@ cmd_service() {   # ccp service start [--at PERCENT] [--every SECONDS] | stop | 
     start)
       [ "$(uname -s)" = Darwin ] || [ -n "${CCP_LAUNCHCTL:-}" ] \
         || die "service: macOS only for now; elsewhere keep 'ccp watch' running (systemd --user, tmux)"
-      at="$(auto_get at)"; every="$(auto_get every)"; at="${at:-99}"; every="${every:-60}"
+      at="$(conf at)"; every="$(auto_get every)"; every="${every:-60}"
       while [ $# -gt 0 ]; do
         case "$1" in
           --at) shift; at="${1:-}" ;;
@@ -771,6 +872,7 @@ cmd_service() {   # ccp service start [--at PERCENT] [--every SECONDS] | stop | 
       done
       check_auto "$at" "$every"
       command -v python3 >/dev/null 2>&1 || die "service needs python3"
+      set_conf at "$at"
       self="$(self_path)"
       mkdir -p "$CCP_HOME" "$(dirname "$plist")"
       printf 'at=%s\nevery=%s\n' "$at" "$every" > "$CCP_HOME/auto"
@@ -787,6 +889,7 @@ cmd_service() {   # ccp service start [--at PERCENT] [--every SECONDS] | stop | 
     <key>PATH</key><string>$(xml "$PATH")</string>
     <key>CCP_HOME</key><string>$(xml "$CCP_HOME")</string>
     <key>CCP_BASE</key><string>$(xml "$BASE")</string>
+    <key>LANG</key><string>$(xml "${LANG:-en_US.UTF-8}")</string>
   </dict>
   <key>WorkingDirectory</key><string>$(xml "$HOME")</string>
   <key>RunAtLoad</key><true/>
@@ -812,7 +915,7 @@ EOF
       ;;
     status)
       if pid="$("$lc" print "$dom/$AGENT" 2>/dev/null | sed -n 's/^[[:space:]]*pid = \([0-9]*\).*/\1/p' | head -1)" && [ -n "$pid" ]; then
-        say "service: running (pid $pid), at $(auto_get at)% · every $(auto_get every)s"
+        say "service: running (pid $pid), at $(conf at)% · every $(auto_get every)s · respawn $(conf respawn) · continue $(conf continue)"
       elif [ -f "$plist" ]; then say "service: loaded, not running (see $CCP_HOME/watch.log)"
       else say "service: off (ccp service start)"; fi
       say "account in use: $(label "$(holder)") (its login is in ~/.claude)"
@@ -1480,6 +1583,8 @@ ccp $VERSION — several Claude Code accounts on one computer, no logging in aga
   ccp service start [--at 99]   in the background: when the account in use is full, ~/.claude takes the login of the
                                 next one with room; sessions stay where they are   (stop · status)
   ccp watch [--at 99]           the same in this terminal
+  ccp config [key value]        at <percent> (99) · respawn on|off (on) · continue on|off (on): when to switch, whether
+                                running sessions restart in place to take the new login, whether a cut-off one goes on
   ccp env [n|name]              eval "\$(ccp env 2)": pin this shell to a profile
   ccp login <n|name>            sign a profile in again
   ccp rm <n|name> [--yes]       sign out and delete a profile
@@ -1508,6 +1613,7 @@ main() {
     _respawn) cmd__respawn "$@" ;;
     watch) cmd_watch "$@" ;;
     service) cmd_service "$@" ;;
+    config) cmd_config "$@" ;;
     usage) cmd_usage once "$@" ;;
     top) cmd_usage top "$@" ;;
     rm|remove) cmd_rm "$@" ;;
