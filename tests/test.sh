@@ -15,9 +15,17 @@ cat > "$T/bin/claude" <<'EOF'
 #!/bin/bash
 cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 [ "${1:-}" = active ] && { echo "ACTIVE=${CCP_ACTIVE:-}"; exit 0; }
+case "${1:-}" in   # background sessions: stop, --bg --resume, agents
+  stop) echo "stop $2 CONFIG=${CLAUDE_CONFIG_DIR:-unset}" >> "$HOME/stub.log"; kill "$(cat "$cfg/stub-bg.pid" 2>/dev/null)" 2>/dev/null; exit 0 ;;
+  --bg) case "${CLAUDE_CONFIG_DIR:-}" in *acct-5) echo "Workspace not trusted"; exit 1 ;; esac
+        echo "bg-resume $3 CONFIG=${CLAUDE_CONFIG_DIR:-unset}" >> "$HOME/stub.log"; echo "${3%%-*}" >> "$cfg/stub-agents"
+        echo "backgrounded · ${3%%-*}"; exit 0 ;;
+  agents) printf '['; sep=""; [ -f "$cfg/stub-agents" ] && while read -r a; do printf '%s{"id": "%s"}' "$sep" "$a"; sep=","; done < "$cfg/stub-agents"; echo ']'; exit 0 ;;
+esac
 if [ "${1:-}" = --stay ]; then   # a session that stays open, with the record Claude Code keeps for it, until it is ended
   mkdir -p "$cfg/sessions"
-  printf '{"pid": %s, "sessionId": "sid-1", "status": "%s"}\n' "$$" "${STUB_STATUS:-idle}" > "$cfg/sessions/$$.json"
+  printf '{"pid": %s, "sessionId": "%s", "status": "%s", "kind": "%s", "cwd": "%s"}\n' "$$" "${STUB_SID:-sid-1}" "${STUB_STATUS:-idle}" "${STUB_KIND:-interactive}" "$PWD" > "$cfg/sessions/$$.json"
+  echo "$$" > "$cfg/stub-bg.pid"
   trap 'echo "TERM CONFIG=${CLAUDE_CONFIG_DIR:-unset}"; rm -f "$cfg/sessions/$$.json"; exit 143' TERM
   [ -n "${STUB_RUN:-}" ] && ( sleep 0.3; export CLAUDECODE=1; eval "$STUB_RUN" > "$HOME/stub-run.out" 2>&1 ) &   # a command run inside it
   i=0; while [ "$i" -lt "${STUB_TICKS:-100}" ]; do sleep 0.1; i=$((i + 1)); done
@@ -217,6 +225,29 @@ ok "sw inside: a session started without ccp run says what to do" '! CLAUDECODE=
 mkdir -p "$T/otherrun"; sleep 5 & OTHER=$!; echo "$OTHER" > "$T/otherrun/pid"
 ok "sw inside: never switches a session it does not run in" '! CLAUDECODE=1 CCP_RUN="$T/otherrun" ccp sw 3 2>/dev/null && [ ! -e "$T/otherrun/request" ]'
 kill "$OTHER" 2>/dev/null; wait "$OTHER" 2>/dev/null
+
+# a background session (agent view) moves to another account's background
+waitfor() { i=0; while [ ! -s "$1" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done; }
+rm -f "$P/attach" "$HOME/stub.log" "$HOME/stub-run.out"
+echo "{\"projects\": {\"$HOME\": {\"hasTrustDialogAccepted\": true}}}" > "$HOME/.claude.json"
+STUB_KIND=bg STUB_SID=abcd1234-0000 STUB_RUN='export CLAUDE_JOB_DIR=/x/jobs/abcd1234; /bin/bash "$CCP_SRC" sw 3' CCP_SRC="$ROOT/ccp" \
+  "$CCP_CLAUDE" --stay > "$T/bg.out" 2>&1
+waitfor "$P/attach"
+ok "move: ccp sw inside a background session says what happens" 'has "$(cat "$HOME/stub-run.out")" "moving this session to #3: when this turn ends it continues there"'
+ok "move: stops it on its account, then resumes it on the other one" 'grep -q "^stop abcd1234 CONFIG=unset$" "$HOME/stub.log" && grep -q "^bg-resume abcd1234-0000 CONFIG=$P/acct-4$" "$HOME/stub.log" && has "$(cat "$T/bg.out")" "TERM CONFIG=unset"'
+ok "move: the new account trusts the folder the old one trusted" 'grep -q "hasTrustDialogAccepted" "$P/acct-4/.claude.json" && grep -q oauthAccount "$P/acct-4/.claude.json"'
+ok "move: leaves word for a terminal to follow, and a log" '[ "$(cut -f1-2 "$P/attach")" = "acct-4	abcd1234" ] && grep -q "now on #3" "$P/move.log"'
+ok "attach: opens the moved session on its account" '[ "$(ccp attach)" = "CONFIG=$P/acct-4 ARGS=attach abcd1234" ] && [ ! -e "$P/attach" ]'
+ok "attach <id>: finds the account that runs it" '[ "$(ccp attach abcd1234)" = "CONFIG=$P/acct-4 ARGS=attach abcd1234" ] && ! ccp attach nope 2>/dev/null'
+rm -f "$HOME/stub.log"
+STUB_KIND=bg STUB_SID=ffff0000-1111 STUB_RUN='export CLAUDE_JOB_DIR=/x/jobs/ffff0000; /bin/bash "$CCP_SRC" sw 4' CCP_SRC="$ROOT/ccp" \
+  "$CCP_CLAUDE" --stay > "$T/bg.out" 2>&1
+i=0; while ! grep -q "back on" "$P/move.log" && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+ok "move: when the other account cannot take it, it goes back where it was" 'grep -q "back on #1" "$P/move.log" && grep -q "^bg-resume ffff0000-1111 CONFIG=unset$" "$HOME/stub.log" && [ ! -e "$P/attach" ]'
+: > "$P/full"; printf 'acct-4\tabcd1234\t%s\n' "$(date +%s)" > "$P/attach"
+CCP_TEST_TTY=1 CCP_POLL=0.2 ccp run -- --stay > "$T/sup.out" 2>&1
+ok "move: a terminal that runs claude through ccp follows it to the new account" 'has "$(cat "$T/sup.out")" "ccp: opening session abcd1234 on #3" && has "$(cat "$T/sup.out")" "CONFIG=$P/acct-4 ARGS=attach abcd1234" && [ ! -e "$P/attach" ]'
+rm -f "$P/full"
 
 # the status line: every account, its limits and when each resets, as ccp watch last saw them
 now=$(date +%s)

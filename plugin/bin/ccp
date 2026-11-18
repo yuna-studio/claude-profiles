@@ -363,7 +363,154 @@ sw_here() {   # sw_here <number|name>: ask the ccp run around this session to re
     say "switching to $(label "$to"): when this turn ends, this conversation reopens on that account in this terminal"
     return 0
   fi
+  local info from bpid sid short cwd
+  if info="$(bg_here)"; then   # a background session (claude --bg, agent view): move it to that account's background
+    IFS="$TAB" read -r bpid sid short cwd <<EOF
+$info
+EOF
+    from="$(account_of_dir "${CLAUDE_CONFIG_DIR:-}")" || die "this session runs on a config folder ccp does not know"
+    if [ "$to" = "$from" ]; then say "already on $(label "$to")"; return 0; fi
+    detach "$CCP_HOME/move.log" _move "$from" "$to" "$bpid" "$sid" "$short" "$cwd"
+    say "moving this session to $(label "$to"): when this turn ends it continues there, the same conversation"
+    say "a terminal that runs claude through ccp follows it; otherwise open it with: ccp attach"
+    return 0
+  fi
   die "this session was not started with ccp run while ccp service is on, so it cannot switch in place. Type /exit, then run: ccp sw $1"
+}
+
+account_of_dir() {   # account_of_dir <CLAUDE_CONFIG_DIR value> -> profile id ("" is #1)
+  case "$1" in "") echo default ;; "$CCP_HOME"/*) ref "$(basename "$1")" ;; *) return 1 ;; esac
+}
+
+bg_here() {   # inside a background session: "pid<TAB>sessionId<TAB>short id<TAB>cwd" of that session
+  [ -n "${CLAUDE_JOB_DIR:-}" ] || return 1
+  local p=$$ n=0 cfg="${CLAUDE_CONFIG_DIR:-$BASE}"
+  while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null && [ "$n" -lt 40 ]; do
+    if [ -f "$cfg/sessions/$p.json" ]; then
+      python3 - "$cfg/sessions/$p.json" "$(basename "$CLAUDE_JOB_DIR")" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+if d.get("kind") not in ("bg", "background") or not d.get("sessionId"):
+    sys.exit(1)
+print("\t".join([str(d.get("pid") or ""), d["sessionId"], sys.argv[2] or d["sessionId"][:8], d.get("cwd") or ""]))
+PY
+      return
+    fi
+    p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"; n=$((n + 1))
+  done
+  return 1
+}
+
+detach() {   # detach <log> <ccp command...>: run ccp on its own, outside this session, so it outlives it
+  python3 - "$1" "$(self_path)" "${@:2}" <<'PY'
+import os, sys
+log, me, args = sys.argv[1], sys.argv[2], sys.argv[3:]
+if os.fork():
+    sys.exit(0)
+os.setsid()
+if os.fork():
+    os._exit(0)
+env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE") and k not in ("CCP_RUN", "CCP_ACTIVE")}
+null = os.open(os.devnull, os.O_RDONLY)
+out = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+os.dup2(null, 0); os.dup2(out, 1); os.dup2(out, 2)
+os.execve("/bin/bash", ["/bin/bash", me] + args, env)
+PY
+}
+
+notify() {   # a desktop notification, where there is one
+  [ -n "${CCP_NO_NOTIFY:-}" ] && return 0
+  if [ "$(uname -s)" = Darwin ]; then
+    osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "ccp"' -e 'end run' "$1" >/dev/null 2>&1
+  elif command -v notify-send >/dev/null 2>&1; then notify-send ccp "$1" >/dev/null 2>&1; fi
+  return 0
+}
+
+trust_dir() {   # trust_dir <from> <to> <dir>: if <from> trusts the folder (or one above it) and <to> does not, <to> trusts it too
+  local a b
+  if [ "$1" = default ]; then a="$HOME/.claude.json"; else a="$(pdir "$1")/.claude.json"; fi
+  if [ "$2" = default ]; then b="$HOME/.claude.json"; else b="$(pdir "$2")/.claude.json"; fi
+  python3 - "$a" "$b" "$3" <<'PY'
+import json, os, sys
+src, dst, d = sys.argv[1:]
+def trusted(path):
+    try:
+        pr = json.load(open(path)).get("projects") or {}
+    except Exception:
+        return None, {}
+    p = d
+    while True:
+        if (pr.get(p) or {}).get("hasTrustDialogAccepted"):
+            return p, pr
+        if p in ("/", ""):
+            return None, pr
+        p = os.path.dirname(p)
+have, _ = trusted(dst)
+want, _ = trusted(src)
+if have or not want:
+    sys.exit(0)
+try:
+    s = json.load(open(dst))
+except FileNotFoundError:
+    s = {}
+s.setdefault("projects", {}).setdefault(want, {})["hasTrustDialogAccepted"] = True
+tmp = dst + ".ccp-tmp"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump(s, f, indent=2, ensure_ascii=False)
+os.replace(tmp, dst)
+PY
+}
+
+cmd__move() {   # ccp _move <from> <to> <pid> <sessionId> <short id> <cwd>: what `ccp sw` starts for a background session
+  local from="$1" to="$2" pid="$3" sid="$4" short="$5" cwd="$6" c cfg st n=0 out
+  c="$(real_claude)" || exit 1
+  cfg="$BASE"; [ "$from" = default ] || cfg="$(pdir "$from")"
+  say "$(date '+%F %T') move $short: $(label "$from") → $(label "$to")"
+  while kill -0 "$pid" 2>/dev/null; do   # the turn that asked has to end first
+    st="$(session_info "$cfg/sessions/$pid.json" | cut -f2)"
+    case "$st" in ""|idle) break ;; esac
+    n=$((n + 1)); [ "$n" -lt 3600 ] || { say "  still busy after an hour; left it on $(label "$from")"; return 1; }
+    sleep 1
+  done
+  trust_dir "$from" "$to" "$cwd"
+  cd "$cwd" 2>/dev/null || cd "$HOME" || exit 1
+  with_profile "$from" "$c" stop "$short" >/dev/null 2>&1
+  n=0; while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 20 ]; do sleep 1; n=$((n + 1)); done
+  if kill -0 "$pid" 2>/dev/null; then say "  could not stop it; left it on $(label "$from")"; return 1; fi   # never two copies
+  if out="$(with_profile "$to" "$c" --bg --resume "$sid" 2>&1)" && printf '%s' "$out" | grep -q 'backgrounded'; then
+    printf '%s\t%s\t%s\n' "$to" "$short" "$(date +%s)" > "$CCP_HOME/attach.$$" && mv "$CCP_HOME/attach.$$" "$CCP_HOME/attach"
+    say "  now on $(label "$to")"
+    notify "Session $short moved to $(label "$to"). Open it: ccp attach"
+    return 0
+  fi
+  say "  could not start it on $(label "$to"): $(printf '%s' "$out" | tail -1); back on $(label "$from")"
+  with_profile "$from" "$c" --bg --resume "$sid" >/dev/null 2>&1
+  notify "Could not move session $short to $(label "$to"); it stays on $(label "$from")"
+  return 1
+}
+
+claim_attach() {   # claim_attach <id> <run dir>: a background session moved lately to another account; this terminal shows it
+  [ -s "$2/attach" ] && return 0
+  [ -n "$(find "$CCP_HOME/attach" -mmin -2 2>/dev/null)" ] || return 1
+  local to; to="$(cut -f1 "$CCP_HOME/attach" 2>/dev/null)"
+  { exists "$to" && [ "$to" != "$1" ]; } || return 1
+  mv "$CCP_HOME/attach" "$2/attach" 2>/dev/null   # one terminal takes it
+}
+
+cmd_attach() {   # ccp attach [id]: open a background session on whichever account runs it (no id: the one moved last)
+  local short="${1:-}" to="" id
+  if [ -z "$short" ]; then
+    [ -s "$CCP_HOME/attach" ] || die "no session moved lately; ccp attach <id> (claude agents lists them)"
+    IFS="$TAB" read -r to short _ < "$CCP_HOME/attach"
+    rm -f "$CCP_HOME/attach"
+  else
+    for id in $(ids); do
+      if with_profile "$id" "$(real_claude)" agents --json 2>/dev/null | grep -q "\"id\": *\"$short"; then to="$id"; break; fi
+    done
+    [ -n "$to" ] || die "no background session $short on any account"
+  fi
+  cmd_run -p "$to" -- attach "$short"
 }
 
 session_watch() {   # session_watch <id> <auto 0|1> <run dir> <ccp pid>: beside a supervised session, end it once it is idle and
@@ -378,13 +525,19 @@ session_watch() {   # session_watch <id> <auto 0|1> <run dir> <ccp pid>: beside 
     if [ -s "$run/request" ]; then
       to="$(cat "$run/request")"; why=asked
       { exists "$to" && [ "$to" != "$id" ]; } || { rm -f "$run/request"; continue; }
+    elif claim_attach "$id" "$run"; then   # a background session moved to another account: show it there
+      IFS="$TAB" read -r to sid n < "$run/attach"; why=attach
     elif [ "$auto" = 1 ] && is_full "$id"; then
       to="$(cat "$CCP_HOME/default" 2>/dev/null)"; exists "$to" || to=default; why=full
       [ "$to" != "$id" ] || continue   # every account is full: stay
       is_full "$to" && continue
     else continue; fi
-    info="$(session_info "$cfg/sessions/$pid.json")" || continue
-    sid="${info%%$TAB*}"; st="${info#*$TAB}"
+    if info="$(session_info "$cfg/sessions/$pid.json")"; then
+      st="${info#*$TAB}"
+      [ "$why" = attach ] || sid="${info%%$TAB*}"
+    else
+      st=""; [ "$why" = attach ] || continue
+    fi
     [ -n "$sid" ] || continue
     case "$st" in ""|idle) ;; *) continue ;; esac   # never cut a turn, a tool or a question short
     printf '%s\t%s\t%s\n' "$to" "$sid" "$why" > "$run/switch"
@@ -415,6 +568,12 @@ EOF
     [ -s "$run/switch" ] || break
     IFS="$TAB" read -r to sid why < "$run/switch"
     [ -t 0 ] && stty sane 2>/dev/null
+    if [ "$why" = attach ]; then   # the background session it showed now runs on that account: open it there
+      printf '\nccp: opening session %s on %s\n\n' "$sid" "$(label "$to")" >&2
+      id="$to"; rm -f "$run/attach"
+      set -- attach "$sid"
+      continue
+    fi
     if [ "$why" = full ]; then printf '\nccp: %s is full; continuing this conversation on %s\n\n' "$(label "$id")" "$(label "$to")" >&2
     else printf '\nccp: continuing this conversation on %s\n\n' "$(label "$to")" >&2; fi
     id="$to"
@@ -1089,6 +1248,7 @@ ccp $VERSION — several Claude Code accounts on one computer, no logging in aga
   ccp which [dir]               which profile a claude run here would use, and why
   ccp run [-p n|name] [-- args] run Claude Code with the profile for here (or -p)
   ccp sw <n|name>               switch: continue the last conversation in this folder on account n (after /exit)
+  ccp attach [id]               open a background session on whichever account runs it (no id: the one moved last)
   ccp service start [--at 100]  in the background: when the account in use is full, new sessions use the next one
                                 with room, and sessions started with ccp run continue there   (stop · status)
   ccp watch [--at 100]          the same in this terminal
@@ -1097,7 +1257,8 @@ ccp $VERSION — several Claude Code accounts on one computer, no logging in aga
   ccp rm <n|name> [--yes]       sign out and delete a profile
   ccp init zsh|bash             add  eval "\$(ccp init zsh)"  to ~/.zshrc: plain \`claude\` follows the rules
   ccp prompt [--usage]          "#2 work" for your shell prompt; --usage: every account's limits for Claude Code's status line
-  inside Claude Code, while ccp service is on: ccp sw 2 (or /ccp:switch 2) reopens this conversation on #2 in place
+  inside Claude Code: ccp sw 2 (or /ccp:switch 2) moves this conversation to #2 when the turn ends; a background session
+  moves to #2's background, and a terminal that runs claude through ccp (ccp setup) follows it
 
 #1 is your normal ~/.claude. Order: CCP_PROFILE > folder rule > ccp use > #1. Profiles live in $CCP_HOME.
 EOF
@@ -1116,6 +1277,8 @@ main() {
     env) cmd_env "$@" ;;
     run) cmd_run "$@" ;;
     sw|switch) cmd_sw "$@" ;;
+    attach) cmd_attach "$@" ;;
+    _move) cmd__move "$@" ;;
     watch) cmd_watch "$@" ;;
     service) cmd_service "$@" ;;
     usage) cmd_usage once "$@" ;;
