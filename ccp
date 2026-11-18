@@ -481,6 +481,7 @@ cmd__move() {   # ccp _move <from> <to> <pid> <sessionId> <short id> <cwd>: what
   # no launch flags: with flags Claude Code starts a copy under a new id instead of continuing this one
   if out="$(with_profile "$to" "$c" --bg --resume "$sid" 2>&1)" && printf '%s' "$out" | grep -q 'backgrounded'; then
     printf '%s\t%s\t%s\n' "$to" "$short" "$(date +%s)" > "$CCP_HOME/attach.$$" && mv "$CCP_HOME/attach.$$" "$CCP_HOME/attach"
+    with_profile "$from" "$c" rm "$short" >/dev/null 2>&1   # the old account's agent view would start it again there
     say "  now on $(label "$to")"
     notify "Session $short moved to $(label "$to"). Open it: ccp attach"
     return 0
@@ -1107,7 +1108,7 @@ print("✓ status line: every account's limits under the prompt")
 PY
 }
 
-setup_plugin() {   # the Claude Code plugin: /ccp:switch, /ccp:usage, the account row above the prompt
+setup_plugin() {   # the Claude Code plugin: /ccp:switch, /ccp:usage
   local c src="${CCP_PLUGIN_SOURCE:-yuna-studio/claude-profiles}"
   c="$(real_claude 2>/dev/null)" || { say "· plugin: Claude Code not found"; return 0; }
   if "$c" plugin list 2>/dev/null | grep -q 'ccp@claude-profiles'; then say "✓ plugin: ccp is installed"; return 0; fi
@@ -1187,7 +1188,8 @@ dur() {   # dur <seconds>: "4d 15h", "4h 49m", "12m" (or 4일 15시간 … in Ko
 status_line() {   # status_line <id of this session>: every account with its limits and resets as ccp watch last saw them
   local lang=en now fresh=0 id i=0 out="" seg line text detail tok name rest used reset to short=0
   local on="" off="" bold="" dim="" red="" yellow="" green="" w_this="this session" w_5h="5h" w_wk="week" w_new="new sessions →"
-  case "${CCP_LANG:-${LC_ALL:-${LANG:-}}}" in ko*) lang=ko; w_this="이 세션"; w_5h="5시간"; w_wk="주간"; w_new="새 세션 →" ;; esac
+  local w_wait="checking" w_out="signed out"
+  case "${CCP_LANG:-${LC_ALL:-${LANG:-}}}" in ko*) lang=ko; w_this="이 세션"; w_5h="5시간"; w_wk="주간"; w_new="새 세션 →"; w_wait="확인 중"; w_out="로그인 필요" ;; esac
   if [ -z "${NO_COLOR:-}" ]; then
     on="$(printf '\033[1;7m')"; off="$(printf '\033[0m')"; bold="$(printf '\033[1m')"; dim="$(printf '\033[2m')"
     red="$(printf '\033[31m')"; yellow="$(printf '\033[33m')"; green="$(printf '\033[32m')"
@@ -1217,11 +1219,10 @@ status_line() {   # status_line <id of this session>: every account with its lim
         fi
       done
     else
-      case "$text" in
-        "") ;;
-        "sign-in expired"*) seg="${seg}  ${dim}sign-in expired${off}" ;;
-        "not logged in") seg="${seg}  ${dim}not logged in${off}" ;;
-        *) seg="${seg}  ${dim}?${off}" ;;
+      case "$text" in   # no numbers yet: a new account, or the usage endpoint asked to wait
+        "not logged in") seg="${seg}  ${dim}${w_out}${off}" ;;
+        "sign-in expired"*|"") [ "$fresh" = 1 ] && seg="${seg}  ${dim}${w_wait}${off}" ;;
+        *) seg="${seg}  ${dim}${w_wait}${off}" ;;
       esac
     fi
     out="${out}${out:+  ${dim}┃${off}  }${seg}"
@@ -1233,24 +1234,6 @@ status_line() {   # status_line <id of this session>: every account with its lim
   printf '%s' "${out}"
 }
 
-accounts_tsv() {   # accounts_tsv <id of this session>: the plugin's account row reads this; "#hint" first, then one line per
-                  # account: number, id, 1 for this session's, its limits in short
-  local w5="5h" ww="wk" hint="switch: ctrl+x tab, arrows, Enter" fresh=0 id i=0 text detail tok name rest used
-  case "${CCP_LANG:-${LC_ALL:-${LANG:-}}}" in ko*) w5="5시간"; ww="주간"; hint="계정 바꾸기: ctrl+x tab, 방향키, Enter" ;; esac
-  [ -n "$(find "$CCP_HOME/seen" -mmin -15 2>/dev/null)" ] && fresh=1
-  printf '#hint\t%s\n' "$hint"
-  for id in $(ids); do
-    i=$((i + 1)); text=""; detail=""
-    [ "$fresh" = 1 ] && detail="$(awk -F '\t' -v id="$id" '$1 == id { print $3; exit }' "$CCP_HOME/seen")"
-    for tok in $detail; do
-      name="${tok%%:*}"; rest="${tok#*:}"; used="${rest%%:*}"
-      case "$name" in 5h) name="$w5" ;; *) name="$ww" ;; esac
-      text="${text}${text:+ }${name} ${used}%"
-    done
-    printf '%s\t%s\t%s\t%s\n' "$i" "$id" "$( [ "$id" = "${1:-}" ] && echo 1 || echo 0)" "$text"
-  done
-}
-
 cmd_prompt() {   # ccp prompt [--usage]: inside Claude Code the account it runs on ("#2 work"), in a shell the one `claude` would use
                  # here; --usage lists every account with its limits, for Claude Code's status line
   local id="" inside=0
@@ -1260,7 +1243,6 @@ cmd_prompt() {   # ccp prompt [--usage]: inside Claude Code the account it runs 
     case "${CLAUDE_CONFIG_DIR:-}" in "") id=default ;; "$CCP_HOME"/*) id="$(ref "$(basename "$CLAUDE_CONFIG_DIR")" 2>/dev/null)" ;; esac
   else id="$(resolve . 2>/dev/null | cut -f1)"; id="$(ref "$id" 2>/dev/null)"; fi
   if [ "${1:-}" = --usage ]; then status_line "$id"; return 0; fi
-  if [ "${1:-}" = --tsv ]; then accounts_tsv "$id"; return 0; fi
   [ -n "$id" ] || return 0
   if [ "$inside" = 1 ] || [ "$id" != default ]; then printf '%s' "$(label "$id")"; fi   # a shell prompt stays quiet on #1
 }

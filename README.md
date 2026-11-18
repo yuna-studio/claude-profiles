@@ -114,14 +114,12 @@ ccp sw work -- --resume   # or pick a conversation
 Nothing is lost: conversation history is shared between profiles. Inside Claude Code, `! ccp ls` shows the accounts and
 `! ccp use 2` makes the next start use #2.
 
-**Background sessions** (`claude --bg`, the agent view): `/ccp:switch 2`, the account row or `! ccp sw 2` inside one stops it
+**Background sessions** (`claude --bg`, the agent view): `/ccp:switch 2` or `! ccp sw 2` inside one stops it
 on its account when the turn ends and continues it, same id and conversation, in #2's background (the folder's trust comes
 along; if #2 cannot take it, it goes back). A terminal that runs `claude` through `ccp` opens it there by itself;
 otherwise `ccp attach` does. Claude Code keeps a background session's launch options per account, so the first move
 starts it with that account's defaults.
 
-The plugin also puts an account row above the prompt: `ctrl+x tab` moves the keyboard onto it, the arrows pick an
-account, Enter switches.
 
 **In place**, while `ccp service` is on and the session was started with `ccp run` (or `claude` after `ccp init`): ask
 Claude to switch accounts (the plugin's `switch-account` skill), type `/ccp:switch 2`, or `! ccp sw 2`. When the turn ends,

@@ -17,6 +17,7 @@ cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 [ "${1:-}" = active ] && { echo "ACTIVE=${CCP_ACTIVE:-}"; exit 0; }
 case "${1:-}" in   # background sessions: stop, --bg --resume, agents
   stop) echo "stop $2 CONFIG=${CLAUDE_CONFIG_DIR:-unset}" >> "$HOME/stub.log"; kill "$(cat "$cfg/stub-bg.pid" 2>/dev/null)" 2>/dev/null; exit 0 ;;
+  rm) echo "rm $2 CONFIG=${CLAUDE_CONFIG_DIR:-unset}" >> "$HOME/stub.log"; exit 0 ;;
   --bg) case "${CLAUDE_CONFIG_DIR:-}" in *acct-5) echo "Workspace not trusted"; exit 1 ;; esac
         echo "bg-resume $3 CONFIG=${CLAUDE_CONFIG_DIR:-unset} FLAGS=${*:4}" >> "$HOME/stub.log"; echo "${3%%-*}" >> "$cfg/stub-agents"
         echo "backgrounded · ${3%%-*}"; exit 0 ;;
@@ -246,6 +247,7 @@ waitfor "$P/attach"
 ok "move: ccp sw inside a background session says what happens" 'has "$(cat "$HOME/stub-run.out")" "moving this session to #3: when this turn ends it continues there"'
 ok "move: stops it on its account, then continues it on the other one (no flags: they would start a copy)" 'grep -q "^stop abcd1234 CONFIG=unset$" "$HOME/stub.log" && grep -q "^bg-resume abcd1234-0000 CONFIG=$P/acct-4 FLAGS=$" "$HOME/stub.log" && has "$(cat "$T/bg.out")" "TERM CONFIG=unset"'
 ok "move: the new account trusts the folder the old one trusted" 'grep -q "hasTrustDialogAccepted" "$P/acct-4/.claude.json" && grep -q oauthAccount "$P/acct-4/.claude.json"'
+ok "move: the old account's list drops it, so it cannot start twice" 'grep -q "^rm abcd1234 CONFIG=unset$" "$HOME/stub.log"'
 ok "move: leaves word for a terminal to follow, and a log" '[ "$(cut -f1-2 "$P/attach")" = "acct-4	abcd1234" ] && grep -q "now on #3" "$P/move.log"'
 ok "attach: opens the moved session on its account" '[ "$(ccp attach)" = "CONFIG=$P/acct-4 ARGS=attach abcd1234" ] && [ ! -e "$P/attach" ]'
 ok "attach <id>: finds the account that runs it" '[ "$(ccp attach abcd1234)" = "CONFIG=$P/acct-4 ARGS=attach abcd1234" ] && ! ccp attach nope 2>/dev/null'
@@ -265,8 +267,8 @@ printf 'default\tweek 98%%\twk:98:%s\nacct-3\tnot logged in\t\nacct-4\t5-hour 3%
   $((now + 4 * 86400 + 15 * 3600 + 90)) $((now + 4 * 3600 + 49 * 60 + 20)) $((now + 5 * 86400 + 21 * 3600 + 90)) > "$P/seen"
 out="$(NO_COLOR=1 CCP_ACTIVE=default ccp prompt --usage)"
 ok "status line: this session's account stands out" 'has "$out" " ▶ #1 this session " && ! has "$out" "▶ #3" 2>/dev/null'
-ok "status line: every account and when each limit resets, short for the others when there are many" 'has "$out" "week 98% (resets in 4d 15h)  ┃  #2  not logged in  ┃  #3 5h 3%(4h) week 17%(5d)  ┃  #4  sign-in expired  ┃  #5  ┃  #6"'
-ok "status line: in Korean" 'has "$(NO_COLOR=1 CCP_LANG=ko CCP_ACTIVE=acct-4 ccp prompt --usage)" "#1 주간 98%(4일)  ┃  #2  not logged in  ┃   ▶ #3 이 세션   5시간 3% (4시간 49분 뒤 리셋)  주간 17% (5일 21시간 뒤 리셋)"'
+ok "status line: every account and when each limit resets, short for the others when there are many" 'has "$out" "week 98% (resets in 4d 15h)  ┃  #2  signed out  ┃  #3 5h 3%(4h) week 17%(5d)  ┃  #4  checking  ┃  #5  checking  ┃  #6  checking"'
+ok "status line: in Korean" 'has "$(NO_COLOR=1 CCP_LANG=ko CCP_ACTIVE=acct-4 ccp prompt --usage)" "#1 주간 98%(4일)  ┃  #2  로그인 필요  ┃   ▶ #3 이 세션   5시간 3% (4시간 49분 뒤 리셋)  주간 17% (5일 21시간 뒤 리셋)"'
 mkdir -p "$T/two/acct-2" && echo isolated=0 > "$T/two/acct-2/.ccp" && printf 'default\nacct-2\n' > "$T/two/order"
 sed -n "1p;3p" "$P/seen" | sed "s/^acct-4/acct-2/" > "$T/two/seen"
 ok "status line: two accounts, both in full" '[ "$(NO_COLOR=1 CCP_HOME="$T/two" CCP_ACTIVE=default ccp prompt --usage)" = " ▶ #1 this session   week 98% (resets in 4d 15h)  ┃  #2  5h 3% (resets in 4h 49m)  week 17% (resets in 5d 21h)" ]'

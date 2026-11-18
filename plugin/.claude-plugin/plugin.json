@@ -7,6 +7,5 @@
   },
   "homepage": "https://github.com/yuna-studio/claude-profiles",
   "repository": "https://github.com/yuna-studio/claude-profiles",
-  "license": "MIT",
-  "types": "./types/index.d.ts"
+  "license": "MIT"
 }
