@@ -27,6 +27,9 @@ ccp 0.4.0 · usage per account · 14:08:04 · refresh 60s (next in 57s) · r ref
 
 ## 설치
 
+설치한 뒤 컴퓨터마다 한 번 `ccp setup`(스크립트 설치는 알아서 돌려요). `claude` 를 ccp 로 띄우는 셸 줄 · 계정마다 한도가 보이는
+상태 줄 · Claude Code 플러그인 · 백그라운드 서비스를 한 번에 넣고, `ccp setup --undo` 로 다시 빼요.
+
 Homebrew:
 
 ```sh
@@ -81,6 +84,13 @@ ccp sw work -- --resume   # 다른 대화를 골라 이어도 돼요
 ```
 
 대화 기록은 계정끼리 같이 써서 잃는 게 없어요. Claude Code 안에서 `! ccp ls` 로 계정 목록을 보고, `! ccp use 2` 로 다음 시작을 2번으로 정할 수 있어요.
+
+**백그라운드 세션**(`claude --bg`, 에이전트 화면): 그 안에서 `/ccp:switch 2` · 계정 줄 · `! ccp sw 2` 를 쓰면, 답이 끝날 때
+그 계정에서 멈추고 같은 ID · 같은 대화로 2번 계정의 백그라운드에서 이어요(폴더 신뢰도 따라가고, 2번이 못 받으면 원래 계정으로 돌아가요).
+`claude` 를 ccp 로 띄운 터미널은 알아서 그 세션을 2번 쪽에서 열고, 아니면 `ccp attach` 로 열어요. 백그라운드 세션의 실행 옵션은
+계정마다 따로 저장돼서, 처음 옮길 땐 그 계정 기본값으로 떠요.
+
+플러그인은 프롬프트 위에 계정 줄도 띄워요. `ctrl+x tab` 으로 들어가 방향키로 고르고 Enter 로 바꿔요.
 
 **그 자리에서 바꾸기**: `ccp service` 가 켜져 있고 `ccp run`(또는 `ccp init` 뒤의 `claude`)으로 띄운 세션이면, Claude 에게
 「2번 계정으로 바꿔」라고 하거나(플러그인의 `switch-account` 스킬) `/ccp:switch 2` · `! ccp sw 2` 를 쳐요. 그 답이 끝나면
