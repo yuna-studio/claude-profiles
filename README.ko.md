@@ -82,11 +82,21 @@ ccp sw work -- --resume   # 다른 대화를 골라 이어도 돼요
 
 대화 기록은 계정끼리 같이 써서 잃는 게 없어요. Claude Code 안에서 `! ccp ls` 로 계정 목록을 보고, `! ccp use 2` 로 다음 시작을 2번으로 정할 수 있어요.
 
-지금 몇 번 계정인지 늘 보이게 하려면 `~/.claude/settings.json` 상태 줄에 `ccp prompt` 를 넣어요.
+**그 자리에서 바꾸기**: `ccp service` 가 켜져 있고 `ccp run`(또는 `ccp init` 뒤의 `claude`)으로 띄운 세션이면, Claude 에게
+「2번 계정으로 바꿔」라고 하거나(플러그인의 `switch-account` 스킬) `/ccp:switch 2` · `! ccp sw 2` 를 쳐요. 그 답이 끝나면
+같은 터미널에서 같은 대화가 2번 계정으로 다시 열려요(몇 초, 로그인 없음).
+
+입력창 아래에 계정마다 한도를 띄우려면 `~/.claude/settings.json` 상태 줄에 `ccp prompt --usage` 를 넣어요.
 
 ```json
-{ "statusLine": { "type": "command", "command": "ccp prompt" } }
+{ "statusLine": { "type": "command", "command": "ccp prompt --usage" } }
 ```
+
+```
+▶ #1 wk 98%  ·  #2 5h 3% wk 17%
+```
+
+`▶` 가 이 세션의 계정이고, 숫자는 `ccp service` 가 마지막으로 본 사용량이에요(서비스가 꺼져 있으면 계정 번호만). 그냥 `ccp prompt` 는 `#2 work` 만 찍어요.
 
 ## 한도가 차면 다음 계정으로
 

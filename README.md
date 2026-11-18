@@ -110,13 +110,22 @@ ccp sw work -- --resume   # or pick a conversation
 Nothing is lost: conversation history is shared between profiles. Inside Claude Code, `! ccp ls` shows the accounts and
 `! ccp use 2` makes the next start use #2.
 
-To always see which account you are on, put `ccp prompt` in Claude Code's status line (`~/.claude/settings.json`):
+**In place**, while `ccp service` is on and the session was started with `ccp run` (or `claude` after `ccp init`): ask
+Claude to switch accounts (the plugin's `switch-account` skill), type `/ccp:switch 2`, or `! ccp sw 2`. When the turn ends,
+the same conversation reopens on #2 in the same terminal, in a couple of seconds and without signing in.
+
+To see every account's limits under the prompt, put `ccp prompt --usage` in Claude Code's status line (`~/.claude/settings.json`):
 
 ```json
-{ "statusLine": { "type": "command", "command": "ccp prompt" } }
+{ "statusLine": { "type": "command", "command": "ccp prompt --usage" } }
 ```
 
-It prints `#2 work` for the account the session runs on, or add `$(ccp prompt)` to a status line script you already have.
+```
+▶ #1 wk 98%  ·  #2 5h 3% wk 17%
+```
+
+`▶` marks the account this session runs on; the numbers are what `ccp service` saw in its last check (no service: just the
+accounts). Plain `ccp prompt` prints `#2 work`, for a shell prompt or a status line script you already have.
 
 ## Move on when an account is full
 
