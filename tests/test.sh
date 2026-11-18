@@ -267,6 +267,7 @@ STUB_KIND=bg STUB_SID=ffff0000-1111 STUB_RUN='export CLAUDE_JOB_DIR=/x/jobs/ffff
   "$CCP_CLAUDE" --stay > "$T/bg.out" 2>&1
 i=0; while ! grep -q "back on" "$P/move.log" && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
 ok "move: when the other account cannot take it, it goes back where it was" 'grep -q "back on #1" "$P/move.log" && grep -q "^bg-resume ffff0000-1111 CONFIG=unset FLAGS=$" "$HOME/stub.log" && [ ! -e "$P/attach" ]'
+ok "move: and remembers, so following does not retry it at once" '[ "$(cat "$P/moving/ffff0000.failed" 2>/dev/null)" = acct-5 ]'
 rm -f "$HOME/stub.log"
 STUB_KIND=bg STUB_SID=eeee0000-2222 STUB_RUN='export CLAUDE_JOB_DIR=/x/jobs/eeee0000; /bin/bash "$CCP_SRC" sw 5' CCP_SRC="$ROOT/ccp" \
   "$CCP_CLAUDE" --stay > "$T/bg.out" 2>&1
@@ -279,17 +280,25 @@ ok "move: a session with no saved conversation stays put" 'grep -q "nothing to m
 
 # one account at a time: background sessions on another account follow the one in use
 rm -f "$P/default" "$HOME/stub.log"; rm -rf "$P/moving"
-mkdir -p "$HOME/ruled"; ccp here 1 "$HOME/ruled" >/dev/null
+mkdir -p "$HOME/ruled" "$T/wt"; ccp here 1 "$HOME/ruled" >/dev/null
 touch "$HOME/.claude/projects/-home/cccc0000-4444.jsonl"
 STUB_KIND=bg STUB_SID=cccc0000-4444 "$CCP_CLAUDE" --stay > "$T/bg.out" 2>&1 &
 BG=$!; sleep 30 & RULED=$!; sleep 0.3
 printf '[{"pid": %s, "id": "cccc0000", "sessionId": "cccc0000-4444", "cwd": "%s", "kind": "background", "status": "idle"}, {"pid": %s, "id": "bbbb0000", "sessionId": "bbbb0000-5555", "cwd": "%s", "kind": "background"}, {"pid": 999999, "id": "aaaa0000", "sessionId": "aaaa0000-6666", "cwd": "%s", "kind": "background"}]\n' \
-  "$BG" "$HOME" "$RULED" "$HOME/ruled" "$HOME" > "$HOME/.claude/stub-agents.json"
+  "$BG" "$T/wt" "$RULED" "$HOME/ruled" "$HOME" > "$HOME/.claude/stub-agents.json"
 out="$(ccp use 3)"
 i=0; while ! grep -q "^bg-resume cccc0000" "$HOME/stub.log" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
 wait "$BG" 2>/dev/null
 ok "use: running background sessions follow the account you pick" 'has "$out" "1 running session(s) move to #3 when their turn ends" && grep -q "^stop cccc0000 CONFIG=unset$" "$HOME/stub.log" && grep -q "^bg-resume cccc0000-4444 CONFIG=$P/acct-4 FLAGS=$" "$HOME/stub.log"'
 ok "use: a folder rule keeps a session on its account; a closed one is left alone" '! grep -q "bbbb0000\|aaaa0000" "$HOME/stub.log"'
+i=0; while [ -d "$P/moving/cccc0000" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+ok "follow: a finished move lets go of its lock" '[ ! -d "$P/moving/cccc0000" ]'
+ok "move: a folder the old account runs in without its own entry (a worktree) is trusted on the new one" 'grep -q "\"$T/wt\"" "$P/acct-4/.claude.json"'
+sleep 30 & GONE=$!
+echo acct-4 > "$P/moving/ffff2222.failed"
+printf '[{"pid": %s, "id": "ffff2222", "sessionId": "ffff2222-9999", "cwd": "%s", "kind": "background"}]\n' "$GONE" "$HOME" > "$HOME/.claude/stub-agents.json"
+ok "follow: an account that could not take a session lately is not tried every minute" '! has "$(ccp use 3)" "running session" 2>/dev/null && [ ! -d "$P/moving/ffff2222" ]'
+kill "$GONE" 2>/dev/null; wait "$GONE" 2>/dev/null; rm -f "$P/moving/ffff2222.failed"
 kill "$RULED" 2>/dev/null; wait "$RULED" 2>/dev/null; ccp here --rm "$HOME/ruled" >/dev/null
 rm -f "$HOME/stub.log"
 touch "$HOME/.claude/projects/-home/dddd1111-7777.jsonl"

@@ -303,6 +303,9 @@ for x in rows if isinstance(rows, list) else []:
 start_move() {   # start_move <from> <to> <pid> <sessionId> <short id> <cwd> [follow]: one _move per session, outside this one
   local lock="$CCP_HOME/moving/$5"
   mkdir -p "$CCP_HOME/moving"
+  if [ "${7:-}" = follow ] && [ -n "$(find "$lock.failed" -mmin -60 2>/dev/null)" ] && [ "$(cat "$lock.failed")" = "$2" ]; then
+    return 1   # that account could not take it lately: no stop-and-start every minute
+  fi
   if ! mkdir "$lock" 2>/dev/null; then   # one is on its way already (it gives up after an hour)
     [ -n "$(find "$lock" -maxdepth 0 -mmin +70 2>/dev/null)" ] || return 1
     rmdir "$lock" 2>/dev/null; mkdir "$lock" 2>/dev/null || return 1
@@ -493,7 +496,8 @@ notify() {   # a desktop notification, where there is one
   return 0
 }
 
-trust_dir() {   # trust_dir <from> <to> <dir>: if <from> trusts the folder (or one above it) and <to> does not, <to> trusts it too
+trust_dir() {   # trust_dir <from> <to> <dir>: a session moves from <from>, where it runs in <dir>; <to> trusts what <from> does
+               # for it (the folder or one above it), or that folder when <from> has no entry of its own
   local a b
   if [ "$1" = default ]; then a="$HOME/.claude.json"; else a="$(pdir "$1")/.claude.json"; fi
   if [ "$2" = default ]; then b="$HOME/.claude.json"; else b="$(pdir "$2")/.claude.json"; fi
@@ -514,8 +518,9 @@ def trusted(path):
         p = os.path.dirname(p)
 have, _ = trusted(dst)
 want, _ = trusted(src)
-if have or not want:
+if have:
     sys.exit(0)
+want = want or d   # the old account runs it there without its own entry (a worktree of a trusted repo): this folder
 try:
     s = json.load(open(dst))
 except FileNotFoundError:
@@ -532,7 +537,7 @@ PY
 cmd__move() {   # ccp _move <from> <to> <pid> <sessionId> <short id> <cwd> [follow]: what `ccp sw` (or following the account
                 # in use) starts for a background session
   local from="$1" to="$2" pid="$3" sid="$4" short="$5" cwd="$6" why="${7:-}" c cfg st n=0 out
-  trap 'rmdir "$CCP_HOME/moving/$short" 2>/dev/null' EXIT   # start_move's lock: the next follow may try again
+  trap "rmdir $(printf '%q' "$CCP_HOME/moving/$short") 2>/dev/null" EXIT   # start_move's lock (expanded now: locals are gone by then)
   c="$(real_claude)" || exit 1
   cfg="$BASE"; [ "$from" = default ] || cfg="$(pdir "$from")"
   say "$(date '+%F %T') move $short: $(label "$from") → $(label "$to")"
@@ -553,17 +558,19 @@ cmd__move() {   # ccp _move <from> <to> <pid> <sessionId> <short id> <cwd> [foll
   cd "$cwd" 2>/dev/null || cd "$HOME" || exit 1
   with_profile "$from" "$c" stop "$short" >/dev/null 2>&1
   n=0; while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 20 ]; do sleep 1; n=$((n + 1)); done
-  if kill -0 "$pid" 2>/dev/null; then say "  could not stop it; left it on $(label "$from")"; return 1; fi   # never two copies
+  if kill -0 "$pid" 2>/dev/null; then say "  could not stop it; left it on $(label "$from")"; echo "$to" > "$CCP_HOME/moving/$short.failed"; return 1; fi   # never two copies
   # no launch flags: with flags Claude Code starts a copy under a new id instead of continuing this one
   if out="$(with_profile "$to" "$c" --bg --resume "$sid" 2>&1)" && printf '%s' "$out" | grep -q 'backgrounded' \
      && started_on "$to" "$short"; then
     printf '%s\t%s\t%s\n' "$to" "$short" "$(date +%s)" > "$CCP_HOME/attach.$$" && mv "$CCP_HOME/attach.$$" "$CCP_HOME/attach"
+    rm -f "$CCP_HOME/moving/$short.failed"
     with_profile "$from" "$c" rm "$short" >/dev/null 2>&1   # the old account's agent view would start it again there
     say "  now on $(label "$to")"
     notify "Session $short moved to $(label "$to"). Open it: ccp attach"
     return 0
   fi
   say "  could not start it on $(label "$to"): $(printf '%s' "$out" | tail -1); back on $(label "$from")"
+  echo "$to" > "$CCP_HOME/moving/$short.failed"   # following tries again in an hour, not every minute
   with_profile "$from" "$c" --bg --resume "$sid" >/dev/null 2>&1
   notify "Could not move session $short to $(label "$to"); it stays on $(label "$from")"
   return 1
