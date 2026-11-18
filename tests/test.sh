@@ -18,7 +18,7 @@ cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 case "${1:-}" in   # background sessions: stop, --bg --resume, agents
   stop) echo "stop $2 CONFIG=${CLAUDE_CONFIG_DIR:-unset}" >> "$HOME/stub.log"; kill "$(cat "$cfg/stub-bg.pid" 2>/dev/null)" 2>/dev/null; exit 0 ;;
   --bg) case "${CLAUDE_CONFIG_DIR:-}" in *acct-5) echo "Workspace not trusted"; exit 1 ;; esac
-        echo "bg-resume $3 CONFIG=${CLAUDE_CONFIG_DIR:-unset}" >> "$HOME/stub.log"; echo "${3%%-*}" >> "$cfg/stub-agents"
+        echo "bg-resume $3 CONFIG=${CLAUDE_CONFIG_DIR:-unset} FLAGS=${*:4}" >> "$HOME/stub.log"; echo "${3%%-*}" >> "$cfg/stub-agents"
         echo "backgrounded · ${3%%-*}"; exit 0 ;;
   agents) printf '['; sep=""; [ -f "$cfg/stub-agents" ] && while read -r a; do printf '%s{"id": "%s"}' "$sep" "$a"; sep=","; done < "$cfg/stub-agents"; echo ']'; exit 0 ;;
 esac
@@ -230,11 +230,13 @@ kill "$OTHER" 2>/dev/null; wait "$OTHER" 2>/dev/null
 waitfor() { i=0; while [ ! -s "$1" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done; }
 rm -f "$P/attach" "$HOME/stub.log" "$HOME/stub-run.out"
 echo "{\"projects\": {\"$HOME\": {\"hasTrustDialogAccepted\": true}}}" > "$HOME/.claude.json"
+mkdir -p "$HOME/.claude/jobs/abcd1234"
+echo '{"respawnFlags": ["--permission-mode", "bypassPermissions", "--name", "my job", "--model", "m"]}' > "$HOME/.claude/jobs/abcd1234/state.json"
 STUB_KIND=bg STUB_SID=abcd1234-0000 STUB_RUN='export CLAUDE_JOB_DIR=/x/jobs/abcd1234; /bin/bash "$CCP_SRC" sw 3' CCP_SRC="$ROOT/ccp" \
   "$CCP_CLAUDE" --stay > "$T/bg.out" 2>&1
 waitfor "$P/attach"
 ok "move: ccp sw inside a background session says what happens" 'has "$(cat "$HOME/stub-run.out")" "moving this session to #3: when this turn ends it continues there"'
-ok "move: stops it on its account, then resumes it on the other one" 'grep -q "^stop abcd1234 CONFIG=unset$" "$HOME/stub.log" && grep -q "^bg-resume abcd1234-0000 CONFIG=$P/acct-4$" "$HOME/stub.log" && has "$(cat "$T/bg.out")" "TERM CONFIG=unset"'
+ok "move: stops it on its account, then continues it on the other one (no flags: they would start a copy)" 'grep -q "^stop abcd1234 CONFIG=unset$" "$HOME/stub.log" && grep -q "^bg-resume abcd1234-0000 CONFIG=$P/acct-4 FLAGS=$" "$HOME/stub.log" && has "$(cat "$T/bg.out")" "TERM CONFIG=unset"'
 ok "move: the new account trusts the folder the old one trusted" 'grep -q "hasTrustDialogAccepted" "$P/acct-4/.claude.json" && grep -q oauthAccount "$P/acct-4/.claude.json"'
 ok "move: leaves word for a terminal to follow, and a log" '[ "$(cut -f1-2 "$P/attach")" = "acct-4	abcd1234" ] && grep -q "now on #3" "$P/move.log"'
 ok "attach: opens the moved session on its account" '[ "$(ccp attach)" = "CONFIG=$P/acct-4 ARGS=attach abcd1234" ] && [ ! -e "$P/attach" ]'
@@ -243,7 +245,7 @@ rm -f "$HOME/stub.log"
 STUB_KIND=bg STUB_SID=ffff0000-1111 STUB_RUN='export CLAUDE_JOB_DIR=/x/jobs/ffff0000; /bin/bash "$CCP_SRC" sw 4' CCP_SRC="$ROOT/ccp" \
   "$CCP_CLAUDE" --stay > "$T/bg.out" 2>&1
 i=0; while ! grep -q "back on" "$P/move.log" && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
-ok "move: when the other account cannot take it, it goes back where it was" 'grep -q "back on #1" "$P/move.log" && grep -q "^bg-resume ffff0000-1111 CONFIG=unset$" "$HOME/stub.log" && [ ! -e "$P/attach" ]'
+ok "move: when the other account cannot take it, it goes back where it was" 'grep -q "back on #1" "$P/move.log" && grep -q "^bg-resume ffff0000-1111 CONFIG=unset FLAGS=$" "$HOME/stub.log" && [ ! -e "$P/attach" ]'
 : > "$P/full"; printf 'acct-4\tabcd1234\t%s\n' "$(date +%s)" > "$P/attach"
 CCP_TEST_TTY=1 CCP_POLL=0.2 ccp run -- --stay > "$T/sup.out" 2>&1
 ok "move: a terminal that runs claude through ccp follows it to the new account" 'has "$(cat "$T/sup.out")" "ccp: opening session abcd1234 on #3" && has "$(cat "$T/sup.out")" "CONFIG=$P/acct-4 ARGS=attach abcd1234" && [ ! -e "$P/attach" ]'

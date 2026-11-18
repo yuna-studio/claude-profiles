@@ -478,6 +478,7 @@ cmd__move() {   # ccp _move <from> <to> <pid> <sessionId> <short id> <cwd>: what
   with_profile "$from" "$c" stop "$short" >/dev/null 2>&1
   n=0; while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 20 ]; do sleep 1; n=$((n + 1)); done
   if kill -0 "$pid" 2>/dev/null; then say "  could not stop it; left it on $(label "$from")"; return 1; fi   # never two copies
+  # no launch flags: with flags Claude Code starts a copy under a new id instead of continuing this one
   if out="$(with_profile "$to" "$c" --bg --resume "$sid" 2>&1)" && printf '%s' "$out" | grep -q 'backgrounded'; then
     printf '%s\t%s\t%s\n' "$to" "$short" "$(date +%s)" > "$CCP_HOME/attach.$$" && mv "$CCP_HOME/attach.$$" "$CCP_HOME/attach"
     say "  now on $(label "$to")"
