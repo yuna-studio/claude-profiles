@@ -1520,4 +1520,4 @@ main() {
   esac
 }
 
-main "$@"
+main "$@"; exit $?   # on one line: bash never reads past it, even if this file is replaced while it runs
