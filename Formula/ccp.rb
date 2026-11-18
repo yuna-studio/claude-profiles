@@ -2,7 +2,7 @@ class Ccp < Formula
   desc "Several Claude Code accounts on one computer, with live usage per account"
   homepage "https://github.com/yuna-studio/claude-profiles"
   url "https://github.com/yuna-studio/claude-profiles/releases/download/v0.5.0/ccp"
-  sha256 "24a81eae7a53e7cd4075e865ec991e75591a61acd057fc7d1193a2bf35f1fc10"
+  sha256 "71d65072ef2a91fd5815021984dbd2d1fd21276b960cbfa08579f007db04fa9d"
   version "0.5.0"
   license "MIT"
 
