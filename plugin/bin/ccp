@@ -287,9 +287,11 @@ cmd_run() {   # ccp run [-p number|name] [--] [claude args...]
   [ "${1:-}" = -- ] && shift
   if [ -z "$want" ]; then r="$(resolve .)" || exit 1; want="${r%%$TAB*}"; why="${r#*$TAB}"; fi
   local id c; id="$(need "$want")" || exit 1; c="$(real_claude)" || exit 1
-  case "$why" in   # a session that follows the default moves with it while ccp watch runs; rules, -p and CCP_PROFILE stay put
-    "ccp use"|built-in) if watching && interactive "$@"; then supervise "$id" "$c" "$@"; exit $?; fi ;;
-  esac
+  if interactive "$@" && { [ -f "$CCP_HOME/auto" ] || watching; }; then   # ccp service is on: stay beside the session
+    local auto=0   # only a session that follows the default moves when its account is full; rules, -p and CCP_PROFILE stay
+    case "$why" in "ccp use"|built-in) auto=1 ;; esac
+    supervise "$id" "$auto" "$c" "$@"; exit $?
+  fi
   export CCP_ACTIVE="$id"   # what is running, for `ccp prompt` in Claude Code's status line
   if [ "$id" = default ]; then unset CLAUDE_CONFIG_DIR; exec "$c" "$@"; fi
   CLAUDE_CONFIG_DIR="$(pdir "$id")" exec "$c" "$@"
@@ -297,6 +299,7 @@ cmd_run() {   # ccp run [-p number|name] [--] [claude args...]
 
 cmd_sw() {   # ccp sw <number|name> [claude args]: the same conversation, now on that account
   [ -n "${1:-}" ] || die "usage: ccp sw <number|name> [claude args]   (continues the last conversation in this folder)"
+  if [ -n "${CLAUDECODE:-}" ]; then sw_here "$1"; return; fi   # from inside Claude Code: a skill, /ccp:switch, ! ccp sw 2
   local want="$1"; shift
   [ "${1:-}" = -- ] && shift
   [ $# -gt 0 ] || set -- --continue
@@ -342,22 +345,49 @@ except Exception: sys.exit(1)
 print("%s\t%s" % (d.get("sessionId") or "", d.get("status") or ""))' "$1" 2>/dev/null
 }
 
-session_watch() {   # session_watch <id> <run dir>: beside a supervised session, end it once its account is full and it is idle
-  local id="$1" run="$2" pid="" cfg info sid st to n
+under() {   # under <pid>: this command runs inside that Claude Code session, not in a background job it started
+  local p=$$ n=0 cfg="${CLAUDE_CONFIG_DIR:-$BASE}"
+  while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null && [ "$n" -lt 40 ]; do
+    [ "$p" = "$1" ] && return 0
+    [ -f "$cfg/sessions/$p.json" ] && return 1   # another session (a background job) in between
+    p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"; n=$((n + 1))
+  done
+  return 1
+}
+
+sw_here() {   # sw_here <number|name>: ask the ccp run around this session to reopen it on that account when the turn ends
+  local to run="${CCP_RUN:-}" pid; to="$(need "$1")" || exit 1
+  if [ -n "$run" ] && [ -d "$run" ] && pid="$(cat "$run/pid" 2>/dev/null)" && kill -0 "$pid" 2>/dev/null && under "$pid"; then
+    if [ "$to" = "${CCP_ACTIVE:-}" ]; then say "already on $(label "$to")"; return 0; fi
+    echo "$to" > "$run/request"
+    say "switching to $(label "$to"): when this turn ends, this conversation reopens on that account in this terminal"
+    return 0
+  fi
+  die "this session was not started with ccp run while ccp service is on, so it cannot switch in place. Type /exit, then run: ccp sw $1"
+}
+
+session_watch() {   # session_watch <id> <auto 0|1> <run dir> <ccp pid>: beside a supervised session, end it once it is idle and
+                    # a switch was asked for (ccp sw inside it), or its account is full (auto)
+  local id="$1" auto="$2" run="$3" me="$4" pid="" cfg info sid st to why n
   cfg="$BASE"; [ "$id" = default ] || cfg="$(pdir "$id")"
-  while sleep "${CCP_POLL:-3}"; do
+  while sleep "${CCP_POLL:-1}"; do
     [ -n "$pid" ] || pid="$(cat "$run/pid" 2>/dev/null)"
     [ -n "$pid" ] || continue
     kill -0 "$pid" 2>/dev/null || return 0
-    is_full "$id" || continue
-    to="$(cat "$CCP_HOME/default" 2>/dev/null)"; exists "$to" || to=default
-    [ "$to" != "$id" ] || continue   # every account is full: stay
-    is_full "$to" && continue
+    case "$(ps -o stat= -p "$pid" 2>/dev/null)" in T*) kill -TSTP "$me" 2>/dev/null; continue ;; esac   # Ctrl+Z: give your shell the terminal
+    if [ -s "$run/request" ]; then
+      to="$(cat "$run/request")"; why=asked
+      { exists "$to" && [ "$to" != "$id" ]; } || { rm -f "$run/request"; continue; }
+    elif [ "$auto" = 1 ] && is_full "$id"; then
+      to="$(cat "$CCP_HOME/default" 2>/dev/null)"; exists "$to" || to=default; why=full
+      [ "$to" != "$id" ] || continue   # every account is full: stay
+      is_full "$to" && continue
+    else continue; fi
     info="$(session_info "$cfg/sessions/$pid.json")" || continue
     sid="${info%%$TAB*}"; st="${info#*$TAB}"
     [ -n "$sid" ] || continue
     case "$st" in ""|idle) ;; *) continue ;; esac   # never cut a turn, a tool or a question short
-    printf '%s\t%s\n' "$to" "$sid" > "$run/switch"
+    printf '%s\t%s\t%s\n' "$to" "$sid" "$why" > "$run/switch"
     kill -TERM "$pid" 2>/dev/null
     n=0; while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 10 ]; do sleep 1; n=$((n + 1)); done
     kill -KILL "$pid" 2>/dev/null
@@ -365,26 +395,28 @@ session_watch() {   # session_watch <id> <run dir>: beside a supervised session,
   done
 }
 
-supervise() {   # supervise <id> <claude> <args...>: ccp run while ccp watch runs; continues the conversation when the account is full
-  local id="$1" c="$2" run rc=0 mon to sid l; shift 2
+supervise() {   # supervise <id> <auto 0|1> <claude> <args...>: ccp run while ccp service is on; reopens the conversation on
+                # another account when asked from inside, or when the account is full
+  local id="$1" auto="$2" c="$3" run rc=0 mon to sid why l; shift 3
   local -a keep=()
   while IFS= read -r l; do [ -n "$l" ] && keep+=("$l"); done <<EOF
 $(keep_flags "$@")
 EOF
   run="$(mktemp -d "${TMPDIR:-/tmp}/ccp-run.XXXXXX")" || die "run: no temp folder"
   while :; do
-    rm -f "$run/pid" "$run/switch"
-    session_watch "$id" "$run" &
+    rm -f "$run/pid" "$run/switch" "$run/request"
+    session_watch "$id" "$auto" "$run" "$$" &
     mon=$!
     # sh writes its pid, then becomes Claude Code: the watcher finds the session record by that pid
-    if [ "$id" = default ]; then CCP_ACTIVE="$id" env -u CLAUDE_CONFIG_DIR /bin/sh -c 'echo $$ > "$0"; exec "$@"' "$run/pid" "$c" "$@"
-    else CCP_ACTIVE="$id" CLAUDE_CONFIG_DIR="$(pdir "$id")" /bin/sh -c 'echo $$ > "$0"; exec "$@"' "$run/pid" "$c" "$@"; fi
+    if [ "$id" = default ]; then CCP_RUN="$run" CCP_ACTIVE="$id" env -u CLAUDE_CONFIG_DIR /bin/sh -c 'echo $$ > "$0"; exec "$@"' "$run/pid" "$c" "$@"
+    else CCP_RUN="$run" CCP_ACTIVE="$id" CLAUDE_CONFIG_DIR="$(pdir "$id")" /bin/sh -c 'echo $$ > "$0"; exec "$@"' "$run/pid" "$c" "$@"; fi
     rc=$?
     kill "$mon" 2>/dev/null; wait "$mon" 2>/dev/null
     [ -s "$run/switch" ] || break
-    IFS="$TAB" read -r to sid < "$run/switch"
+    IFS="$TAB" read -r to sid why < "$run/switch"
     [ -t 0 ] && stty sane 2>/dev/null
-    printf '\nccp: %s is full; continuing this conversation on %s\n\n' "$(label "$id")" "$(label "$to")" >&2
+    if [ "$why" = full ]; then printf '\nccp: %s is full; continuing this conversation on %s\n\n' "$(label "$id")" "$(label "$to")" >&2
+    else printf '\nccp: continuing this conversation on %s\n\n' "$(label "$to")" >&2; fi
     id="$to"
     set -- ${keep[@]+"${keep[@]}"} --resume "$sid"
   done
@@ -849,11 +881,41 @@ EOF
   esac
 }
 
-cmd_prompt() {   # inside Claude Code: the account it runs on ("#2 work"); in a shell: the one `claude` would use here
-  local id
-  if [ -n "${CCP_ACTIVE:-}" ]; then id="$(ref "$CCP_ACTIVE" 2>/dev/null)" && printf '%s' "$(label "$id")"; return 0; fi
-  id="$(resolve . 2>/dev/null | cut -f1)"; id="$(ref "$id" 2>/dev/null)" || return 0
-  [ "$id" = default ] || printf '%s' "$(label "$id")"   # a shell prompt stays quiet on #1
+status_line() {   # status_line <active id>: every account and its limits as ccp watch last saw them, the active one marked
+  local fresh=0 id i=0 out="" v to
+  [ -n "$(find "$CCP_HOME/seen" -mmin -15 2>/dev/null)" ] && fresh=1
+  for id in $(ids); do
+    i=$((i + 1)); v=""
+    [ "$fresh" = 1 ] && v="$(awk -F '\t' -v id="$id" '$1 == id { print $2; exit }' "$CCP_HOME/seen")"
+    case "$v" in
+      "") ;;
+      *%*) v=" $(printf '%s' "$v" | sed 's/5-hour /5h /; s/week /wk /; s/, / /g')" ;;
+      "sign-in expired"*) v=" expired" ;;
+      "not logged in") v=" no login" ;;
+      *) v=" ?" ;;
+    esac
+    out="$out${out:+  ·  }$( [ "$id" = "$1" ] && printf '▶ ')#$i$v"
+  done
+  if [ -n "$1" ] && is_full "$1"; then
+    to="$(cat "$CCP_HOME/default" 2>/dev/null)"; exists "$to" || to=default
+    [ "$to" = "$1" ] || out="$out  → new sessions #$(pos_of "$to")"
+  fi
+  if [ -n "${NO_COLOR:-}" ]; then printf '%s' "$out"; return 0; fi
+  printf '%s' "$(printf '%s\n' "$out" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+%$/) {
+    v = $i + 0; $i = "\033[" (v >= 90 ? "31" : (v >= 70 ? "33" : "32")) "m" $i "\033[0m" } print }')"
+}
+
+cmd_prompt() {   # ccp prompt [--usage]: inside Claude Code the account it runs on ("#2 work"), in a shell the one `claude` would use
+                 # here; --usage lists every account with its limits, for Claude Code's status line
+  local id="" inside=0
+  if [ -n "${CCP_ACTIVE:-}" ]; then id="$(ref "$CCP_ACTIVE" 2>/dev/null)"; inside=1
+  elif [ -n "${CLAUDECODE:-}" ]; then   # a Claude Code started without ccp: its config folder says which account
+    inside=1
+    case "${CLAUDE_CONFIG_DIR:-}" in "") id=default ;; "$CCP_HOME"/*) id="$(ref "$(basename "$CLAUDE_CONFIG_DIR")" 2>/dev/null)" ;; esac
+  else id="$(resolve . 2>/dev/null | cut -f1)"; id="$(ref "$id" 2>/dev/null)"; fi
+  if [ "${1:-}" = --usage ]; then status_line "$id"; return 0; fi
+  [ -n "$id" ] || return 0
+  if [ "$inside" = 1 ] || [ "$id" != default ]; then printf '%s' "$(label "$id")"; fi   # a shell prompt stays quiet on #1
 }
 
 usage() {
@@ -878,7 +940,8 @@ ccp $VERSION — several Claude Code accounts on one computer, no logging in aga
   ccp login <n|name>            sign a profile in again
   ccp rm <n|name> [--yes]       sign out and delete a profile
   ccp init zsh|bash             add  eval "\$(ccp init zsh)"  to ~/.zshrc: plain \`claude\` follows the rules
-  ccp prompt                    "#2 work" for Claude Code's status line or your shell prompt
+  ccp prompt [--usage]          "#2 work" for your shell prompt; --usage: every account's limits for Claude Code's status line
+  inside Claude Code, while ccp service is on: ccp sw 2 (or /ccp:switch 2) reopens this conversation on #2 in place
 
 #1 is your normal ~/.claude. Order: CCP_PROFILE > folder rule > ccp use > #1. Profiles live in $CCP_HOME.
 EOF
@@ -903,7 +966,7 @@ main() {
     top) cmd_usage top "$@" ;;
     rm|remove) cmd_rm "$@" ;;
     init) cmd_init "$@" ;;
-    prompt) cmd_prompt ;;
+    prompt) cmd_prompt "$@" ;;
     -v|--version|version) say "ccp $VERSION" ;;
     -h|--help|help) usage ;;
     *) usage >&2; exit 2 ;;

@@ -1,9 +1,11 @@
 ---
-description: Continue this conversation on another account (ccp sw)
+description: Move this conversation to another account in place (ccp sw)
 argument-hint: <number|name>
 allowed-tools: Bash(ccp:*)
 ---
 
-!`ccp ls`
+!`ccp sw $ARGUMENTS 2>&1`
 
-A running session cannot change its account. Tell the user in two short lines: type /exit, then run `ccp sw $ARGUMENTS` in this folder, and the conversation continues on that account.
+Tell the user what the line above says in one short sentence, then end your turn right away without doing anything else.
+If it says "switching", this conversation reopens on that account in this terminal as soon as the turn ends. If it says
+the session cannot switch in place, give the two steps it names (/exit, then ccp sw).

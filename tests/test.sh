@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/ccp-test.XXXXXX")" && pwd -P)"   # real path: macOS /var is a link
 trap 'rm -rf "$T"' EXIT
 export HOME="$T/home"; mkdir -p "$HOME/.claude/agents" "$T/bin"
-unset CCP_PROFILE CLAUDE_CONFIG_DIR CCP_HOME CCP_BASE
+unset CCP_PROFILE CLAUDE_CONFIG_DIR CCP_HOME CCP_BASE CLAUDECODE CCP_RUN CCP_ACTIVE NO_COLOR
 echo '{"model":"x"}' > "$HOME/.claude/settings.json"
 echo '# mine' > "$HOME/.claude/CLAUDE.md"
 echo '{"mcpServers":{"docs":{"command":"docs-mcp"}},"oauthAccount":{"emailAddress":"me@x.com"}}' > "$HOME/.claude.json"
@@ -18,6 +18,7 @@ if [ "${1:-}" = --stay ]; then   # a session that stays open, with the record Cl
   mkdir -p "$cfg/sessions"
   printf '{"pid": %s, "sessionId": "sid-1", "status": "%s"}\n' "$$" "${STUB_STATUS:-idle}" > "$cfg/sessions/$$.json"
   trap 'echo "TERM CONFIG=${CLAUDE_CONFIG_DIR:-unset}"; rm -f "$cfg/sessions/$$.json"; exit 143' TERM
+  [ -n "${STUB_RUN:-}" ] && ( sleep 0.3; export CLAUDECODE=1; eval "$STUB_RUN" > "$HOME/stub-run.out" 2>&1 ) &   # a command run inside it
   i=0; while [ "$i" -lt "${STUB_TICKS:-100}" ]; do sleep 0.1; i=$((i + 1)); done
   rm -f "$cfg/sessions/$$.json"; echo "ENDED CONFIG=${CLAUDE_CONFIG_DIR:-unset}"; exit 0
 fi
@@ -201,7 +202,28 @@ wait "$SUP"; out="$(cat "$T/sup.out")"
 ok "auto switch: never cuts a busy session short" 'has "$out" "ENDED CONFIG=unset" && ! has "$out" "continuing" 2>/dev/null'
 ok "auto switch: -p and print mode are left alone" '[ "$(CCP_TEST_TTY=1 ccp run -p 1 -- x)" = "CONFIG=unset ARGS=x" ] && [ "$(CCP_TEST_TTY=1 ccp run -- -p hi)" = "CONFIG=$P/acct-4 ARGS=-p hi" ]'
 ok "auto switch: off without a terminal" '[ "$(ccp run -- x)" = "CONFIG=$P/acct-4 ARGS=x" ]'
-rm -f "$P/default" "$P/full"
+
+# switching in place from inside the session (a skill or /ccp:switch runs ccp sw there)
+rm -f "$P/default"; : > "$P/full"
+STUB_RUN='/bin/bash "$CCP_SRC" sw 3' CCP_SRC="$ROOT/ccp" CCP_TEST_TTY=1 CCP_POLL=0.2 ccp run -- --stay --model m > "$T/sup.out" 2>&1
+out="$(cat "$T/sup.out")"
+ok "sw inside: asks the ccp run around the session" 'has "$(cat "$HOME/stub-run.out")" "switching to #3: when this turn ends"'
+ok "sw inside: the same terminal reopens the conversation on that account" 'has "$out" "TERM CONFIG=unset" && has "$out" "ccp: continuing this conversation on #3" && has "$out" "CONFIG=$P/acct-4 ARGS=--model m --resume sid-1"'
+ok "sw inside: a session started without ccp run says what to do" '! CLAUDECODE=1 ccp sw 3 2>"$T/err" && has "$(cat "$T/err")" "Type /exit, then run: ccp sw 3"'
+mkdir -p "$T/otherrun"; sleep 5 & OTHER=$!; echo "$OTHER" > "$T/otherrun/pid"
+ok "sw inside: never switches a session it does not run in" '! CLAUDECODE=1 CCP_RUN="$T/otherrun" ccp sw 3 2>/dev/null && [ ! -e "$T/otherrun/request" ]'
+kill "$OTHER" 2>/dev/null; wait "$OTHER" 2>/dev/null
+
+# the status line: every account and its limits, as ccp watch last saw them
+printf 'default\tweek 98%%\nacct-3\tnot logged in\nacct-4\t5-hour 3%%, week 17%%\nacct-5\tsign-in expired: open #4 once\n' > "$P/seen"
+out="$(NO_COLOR=1 CCP_ACTIVE=default ccp prompt --usage)"
+ok "status line: every account, the one in use marked" '[ "$out" = "▶ #1 wk 98%  ·  #2 no login  ·  #3 5h 3% wk 17%  ·  #4 expired  ·  #5  ·  #6" ]'
+ok "status line: a Claude Code started without ccp finds its account by its folder" 'has "$(NO_COLOR=1 CLAUDECODE=1 CLAUDE_CONFIG_DIR="$P/acct-4" ccp prompt --usage)" "▶ #3 5h 3%"'
+printf 'default\tweek\t100\t0\n' > "$P/full"; echo acct-4 > "$P/default"
+ok "status line: says where new sessions go once this account is full" 'has "$(NO_COLOR=1 CCP_ACTIVE=default ccp prompt --usage)" "→ new sessions #3"'
+ok "status line: colors by how full" 'has "$(CCP_ACTIVE=default ccp prompt --usage)" "$(printf "\033[31m98%%")" && has "$(CCP_ACTIVE=default ccp prompt --usage)" "$(printf "\033[32m17%%")"'
+rm -f "$P/default" "$P/full" "$P/seen"
+ok "status line: without ccp service, just the accounts" '[ "$(NO_COLOR=1 CCP_ACTIVE=acct-4 ccp prompt --usage)" = "#1  ·  #2  ·  ▶ #3  ·  #4  ·  #5  ·  #6" ]'
 
 # ccp service: a launchd job (launchctl stubbed)
 printf '%s\n' '#!/bin/bash' 'echo "$*" >> "$HOME/launchctl.log"' \
