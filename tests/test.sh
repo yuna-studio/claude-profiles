@@ -6,7 +6,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/ccp-test.XXXXXX")" && pwd -P)"   # real path: macOS /var is a link
 trap 'rm -rf "$T"' EXIT
 export HOME="$T/home"; mkdir -p "$HOME/.claude/agents" "$T/bin"
-unset CCP_PROFILE CLAUDE_CONFIG_DIR CCP_HOME CCP_BASE CLAUDECODE CCP_RUN CCP_ACTIVE NO_COLOR
+unset CCP_PROFILE CLAUDE_CONFIG_DIR CCP_HOME CCP_BASE CLAUDECODE CCP_RUN CCP_ACTIVE NO_COLOR CLAUDE_JOB_DIR
+export CCP_NO_KEYCHAIN=1   # sign-ins in files, never the real keychain: ccp use swaps them
 export CCP_LANG=en
 echo '{"model":"x"}' > "$HOME/.claude/settings.json"
 echo '# mine' > "$HOME/.claude/CLAUDE.md"
@@ -21,7 +22,10 @@ case "${1:-}" in   # background sessions: stop, --bg --resume, agents
   --bg) case "${CLAUDE_CONFIG_DIR:-}" in *acct-5) echo "Workspace not trusted"; exit 1 ;; esac
         echo "bg-resume $3 CONFIG=${CLAUDE_CONFIG_DIR:-unset} FLAGS=${*:4}" >> "$HOME/stub.log"; echo "${3%%-*}" >> "$cfg/stub-agents"
         echo "backgrounded · ${3%%-*}"; exit 0 ;;
-  agents) [ -f "$cfg/stub-agents.json" ] && { cat "$cfg/stub-agents.json"; exit 0; }   # a test's own list (pid, cwd, kind)
+  daemon) echo "daemon ${*:2} CONFIG=${CLAUDE_CONFIG_DIR:-unset}" >> "$HOME/stub.log"
+          [ "${2:-}" = status ] && [ -f "$HOME/daemon-up" ] && echo "pid:     4242"; exit 0 ;;
+  agents) echo "agents CONFIG=${CLAUDE_CONFIG_DIR:-unset}" >> "$HOME/stub.log"
+          [ -f "$cfg/stub-agents.json" ] && { cat "$cfg/stub-agents.json"; exit 0; }   # a test's own list (pid, cwd, kind)
           st='"status": "idle"'; case "${CLAUDE_CONFIG_DIR:-}" in *acct-6) st='"state": "failed"' ;; esac   # acct-6: comes up, then fails
           printf '['; sep=""; [ -f "$cfg/stub-agents" ] && while read -r a; do printf '%s{"id": "%s", %s}' "$sep" "$a" "$st"; sep=","; done < "$cfg/stub-agents"; echo ']'; exit 0 ;;
 esac
@@ -87,8 +91,8 @@ ok "run: #1 leaves CLAUDE_CONFIG_DIR unset" '[ "$(ccp run -- hi there)" = "CONFI
 ok "run: an inherited CLAUDE_CONFIG_DIR does not leak into #1" '[ "$(CLAUDE_CONFIG_DIR=/elsewhere ccp run -- x)" = "CONFIG=unset ARGS=x" ]'
 ok "run: unknown profile fails and runs nothing" '! ccp run -p 42 -- x 2>/dev/null && ! ccp run -p nope -- x 2>/dev/null && [ -z "$(ccp run -p 42 -- x 2>/dev/null)" ]'
 
-ccp use work >/dev/null
-ok "use: default everywhere" '[ "$(ccp run -- x)" = "CONFIG=$P/work ARGS=x" ]'
+echo work > "$P/default"   # what `ccp use` of an older ccp left: that folder for everything
+ok "an older ccp's use: that folder for everything" '[ "$(ccp run -- x)" = "CONFIG=$P/work ARGS=x" ]'
 
 mkdir -p "$HOME/w/a/b" "$HOME/w/x" "$HOME/w2"
 ccp here 3 "$HOME/w" >/dev/null          # #3 is acct-2
@@ -119,8 +123,7 @@ ok "ls: rules show the number" 'has "$out" "$HOME/w → #4"'
 eval "$(ccp env 3)"
 ok "env: pins the shell (by number)" '[ "$CLAUDE_CONFIG_DIR" = "$P/acct-4" ] && [ "$CCP_PROFILE" = acct-4 ]'
 unset CLAUDE_CONFIG_DIR CCP_PROFILE
-ok "sw: continues the last conversation on another account" '[ "$(ccp sw 3)" = "CONFIG=$P/acct-4 ARGS=--continue" ] && [ "$(ccp sw work -- --resume abc)" = "CONFIG=$P/work ARGS=--resume abc" ]'
-ok "sw: that account from now on, one account for everything" '[ "$(cat "$P/default")" = work ]'
+ok "sw: an account with no sign-in to lend is refused, nothing changes" '! ccp sw 3 2>"$T/err" >/dev/null && has "$(cat "$T/err")" "#3 has no sign-in to lend" && [ "$(cat "$P/default")" = work ] && [ ! -e "$P/slot" ]'
 ok "run: tells Claude Code which account it runs on" '[ "$(ccp run -p 3 -- active)" = "ACTIVE=acct-4" ] && [ "$(ccp run -p 1 -- active)" = "ACTIVE=default" ]'
 ok "prompt: inside Claude Code, the running account (even #1)" '[ "$(CCP_ACTIVE=acct-4 ccp prompt)" = "#3" ] && [ "$(CCP_ACTIVE=default ccp prompt)" = "#1 default" ] && [ "$(CCP_ACTIVE=work ccp prompt)" = "#5 work" ]'
 ok "init: defines claude() over ccp run" 'has "$(ccp init zsh)" "claude() { command ccp run -- \"\$@\"; }"'
@@ -171,11 +174,11 @@ CCP_USAGE_URL="http://127.0.0.1:$(cat "$PORT_FILE")/usage"
 export CCP_NO_KEYCHAIN=1 CCP_USAGE_URL
 export no_proxy=127.0.0.1,localhost NO_PROXY=127.0.0.1,localhost   # macOS runners: urllib would follow the system proxy
 future=$(( ($(date +%s) + 86400) * 1000 ))
-echo "{\"claudeAiOauth\":{\"accessToken\":\"tok-1\",\"expiresAt\":$future,\"subscriptionType\":\"max\",\"rateLimitTier\":\"default_claude_max_20x\"}}" > "$HOME/.claude/.credentials.json"
+echo "{\"claudeAiOauth\":{\"accessToken\":\"tok-1\",\"refreshToken\":\"rt-1\",\"expiresAt\":$future,\"subscriptionType\":\"max\",\"rateLimitTier\":\"default_claude_max_20x\"},\"mcpOAuth\":{\"docs\":\"m-1\"}}" > "$HOME/.claude/.credentials.json"
 echo '{"oauthAccount":{"emailAddress":"me@x.com"}}' > "$HOME/.claude.json.usage"; cp "$HOME/.claude.json.usage" "$HOME/.claude.json"
-echo "{\"claudeAiOauth\":{\"accessToken\":\"tok-3\",\"expiresAt\":$future,\"subscriptionType\":\"pro\"}}" > "$P/acct-4/.credentials.json"
+echo "{\"claudeAiOauth\":{\"accessToken\":\"tok-3\",\"refreshToken\":\"rt-3\",\"expiresAt\":$future,\"subscriptionType\":\"pro\"}}" > "$P/acct-4/.credentials.json"
 echo '{"oauthAccount":{"emailAddress":"four@x.com"}}' > "$P/acct-4/.claude.json"
-echo '{"claudeAiOauth":{"accessToken":"tok-old","expiresAt":1000,"subscriptionType":"pro"}}' > "$P/acct-5/.credentials.json"
+echo '{"claudeAiOauth":{"accessToken":"tok-old","refreshToken":"rt-5","expiresAt":1000,"subscriptionType":"pro"}}' > "$P/acct-5/.credentials.json"
 echo "{\"claudeAiOauth\":{\"accessToken\":\"tok-bad\",\"expiresAt\":$future}}" > "$P/acct-6/.credentials.json"
 out="$(ccp usage)"
 ok "usage: limits per account, used and left, 5-hour first" 'has "$out" "me@x.com" && has "$out" "max 20x" && has "$out" "5-hour" && has "$out" " 91%     9%" && has "$out" "week           " && has "$out" " 48%    52%" && has "$out" "week · Fable"'
@@ -190,11 +193,21 @@ ok "top: without a terminal prints once" 'has "$(ccp top </dev/null)" "me@x.com"
 
 export CCP_NO_NOTIFY=1
 out="$(ccp watch --once --at 90)"
-ok "watch: a full account hands over to the next one with room" 'has "$out" "#1 me@x.com is at 91% of its 5-hour limit" && has "$out" "Claude Code now uses #3 four@x.com; running sessions follow" && [ "$(cat "$P/default")" = acct-4 ] && [ "$(cat "$P/moved")" = default ]'
+ok "watch: a full account hands over to the next one with room, nothing moves" 'has "$out" "#1 me@x.com is at 91% of its 5-hour limit" && has "$out" "Claude Code now uses #3 four@x.com" && has "$out" "sessions stay where they are" && [ "$(cat "$P/slot")" = acct-4 ] && [ "$(cut -f1 "$P/moved")" = default ]'
+cred() { python3 -c 'import json, sys; d = json.load(open(sys.argv[1])); print(d.get("claudeAiOauth", {}).get(sys.argv[2], "-"))' "$1" "$2"; }
+ok "watch: ~/.claude now holds #3's login, its MCP sign-ins stay" '[ "$(cred "$HOME/.claude/.credentials.json" accessToken)" = tok-3 ] && grep -q "m-1" "$HOME/.claude/.credentials.json"'
+ok "watch: #1's own login is kept aside, #3 keeps no copy that renews" '[ "$(cred "$P/stash-default.json" accessToken)" = tok-1 ] && [ "$(cred "$P/acct-4/.credentials.json" refreshToken)" = "" ] && [ "$(ls -l "$P/stash-default.json" | cut -c1-10)" = -rw------- ]'
+out="$(ccp usage)"
+ok "usage: with #3's login in ~/.claude each account still shows its own numbers, #3 used here" 'has "$out" " 91%     9%" && has "$out" " 12%    88%" && has "$out" "* 3 "'
+ok "run: the folder stays ~/.claude, whichever login it holds" '[ "$(ccp run -- x)" = "CONFIG=unset ARGS=x" ] && [ "$(ccp run -p 3 -- x)" = "CONFIG=unset ARGS=x" ]'
 ok "watch: lists full accounts for running sessions" 'grep -q "^default	5-hour	91	" "$P/full"'
 ok "watch: keeps what it saw for ccp service status" 'grep -q "^default	5-hour 91%, week 48%	5h:91:[0-9]* wk:48:[0-9]*$" "$P/seen" && grep -q "^acct-3	not logged in	$" "$P/seen" && has "$(ccp service status)" "  #1 default: 5-hour 91%, week 48%"'
+python3 - "$HOME/.claude/.credentials.json" <<'EOF'   # Claude Code renews #3's login while it is in ~/.claude
+import json, sys; d = json.load(open(sys.argv[1])); d["claudeAiOauth"]["refreshToken"] = "rt-3b"; json.dump(d, open(sys.argv[1], "w"))
+EOF
 out="$(ccp watch --once --at 95)"
-ok "watch: goes back once the first account has room" 'has "$out" "#1 me@x.com has room again" && [ ! -e "$P/default" ] && [ ! -e "$P/moved" ] && [ ! -s "$P/full" ]'
+ok "watch: goes back once the first account has room" 'has "$out" "#1 me@x.com has room again" && [ ! -e "$P/slot" ] && [ ! -e "$P/moved" ] && [ ! -s "$P/full" ]'
+ok "watch: #1's own login comes back, #3 gets its freshest copy" '[ "$(cred "$HOME/.claude/.credentials.json" accessToken)" = tok-1 ] && [ "$(cred "$P/acct-4/.credentials.json" refreshToken)" = rt-3b ] && [ ! -e "$P/stash-default.json" ] && grep -q "m-1" "$HOME/.claude/.credentials.json"'
 ok "watch: quiet when nothing changes" '[ -z "$(ccp watch --once --at 95)" ]'
 cp "$P/acct-4/.credentials.json" "$T/cred4"
 echo "{\"claudeAiOauth\":{\"accessToken\":\"tok-busy\",\"expiresAt\":$future}}" > "$P/acct-4/.credentials.json"
@@ -203,135 +216,51 @@ ok "watch: 'asked too often' keeps the last numbers and asks less often" 'grep -
 cp "$T/cred4" "$P/acct-4/.credentials.json"; ccp watch --once --at 95 >/dev/null
 ok "watch: back to the usual pace once it answers" '[ ! -e "$P/backoff" ]'
 ccp watch --once --at 10 >/dev/null
-ok "watch: an expired sign-in still has room (Claude Code renews it on start)" '[ "$(cat "$P/default")" = acct-5 ] && [ "$(cat "$P/moved")" = default ]'
+ok "watch: an expired sign-in still has room (Claude Code renews it on start)" '[ "$(cat "$P/slot")" = acct-5 ] && [ "$(cut -f1 "$P/moved")" = default ]'
 ccp use 1 >/dev/null
-ok "use: your choice clears what watch moved" '[ ! -e "$P/default" ] && [ ! -e "$P/moved" ]'
+ok "use: your choice clears what watch switched" '[ ! -e "$P/slot" ] && [ ! -e "$P/moved" ] && [ "$(cred "$HOME/.claude/.credentials.json" accessToken)" = tok-1 ] && [ "$(cred "$P/acct-5/.credentials.json" refreshToken)" = rt-5 ]'
+ok "use: an account with no sign-in to lend is refused, nothing changes" '! ccp use 2 2>"$T/err" >/dev/null && has "$(cat "$T/err")" "#2 has no sign-in to lend" && [ ! -e "$P/slot" ] && [ "$(cred "$HOME/.claude/.credentials.json" accessToken)" = tok-1 ]'
+cp "$HOME/.claude/.credentials.json" "$P/stash-default.json"; cp "$P/acct-4/.credentials.json" "$HOME/.claude/.credentials.json"   # a swap by hand
+ok "use: finds a swap made by hand instead of keeping the lent login aside as #1's" 'has "$(ccp use 3)" "already on #3" && [ "$(cat "$P/slot")" = acct-4 ] && [ "$(cred "$P/acct-4/.credentials.json" refreshToken)" = "" ] && [ "$(cred "$P/stash-default.json" accessToken)" = tok-1 ]'
+ccp use 1 >/dev/null
+ok "use 1: and puts it all back" '[ ! -e "$P/slot" ] && [ "$(cred "$HOME/.claude/.credentials.json" accessToken)" = tok-1 ] && [ "$(cred "$P/acct-4/.credentials.json" refreshToken)" = rt-3b ]'
 ok "watch: refuses odd numbers" '! ccp watch --once --at 0 2>/dev/null && ! ccp watch --once --at 101 2>/dev/null && ! ccp watch --once --every 5 2>/dev/null'
 { kill "$SRV"; wait "$SRV"; } 2>/dev/null
 
-# a running session moves when ccp watch finds its account full
+# a terminal session that ccp run started reopens in place when another account's login is put in ~/.claude
 : > "$P/full"   # a watcher is running, nothing is full yet
 started() { i=0; while ! ls "$1"/*.json >/dev/null 2>&1 && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done; }
 CCP_TEST_TTY=1 CCP_POLL=0.2 ccp run -- --stay --model m "first prompt" > "$T/sup.out" 2>&1 &
 SUP=$!; started "$HOME/.claude/sessions"
-echo acct-4 > "$P/default"; printf 'default\tweek\t100\t0\n' > "$P/full"   # what ccp watch does when #1 is full
+ccp use 3 >/dev/null
 wait "$SUP"; out="$(cat "$T/sup.out")"
-ok "auto switch: ends the idle session on the full account" 'has "$out" "TERM CONFIG=unset"'
-ok "auto switch: continues the same conversation on the new default, keeps options, not the prompt" 'has "$out" "#1 default is full; continuing this conversation on #3" && has "$out" "CONFIG=$P/acct-4 ARGS=--model m --resume sid-1"'
-rm -f "$P/default"; : > "$P/full"
+ok "login change: ends the idle terminal session" 'has "$out" "TERM CONFIG=unset"'
+ok "login change: reopens the same conversation in place, keeps options, not the prompt" 'has "$out" "ccp: now on #3" && has "$out" "CONFIG=unset ARGS=--model m --resume sid-1"'
 STUB_STATUS=busy STUB_TICKS=20 CCP_TEST_TTY=1 CCP_POLL=0.2 ccp run -- --stay > "$T/sup.out" 2>&1 &
 SUP=$!; started "$HOME/.claude/sessions"
-echo acct-4 > "$P/default"; printf 'default\tweek\t100\t0\n' > "$P/full"
+ccp use 1 >/dev/null
 wait "$SUP"; out="$(cat "$T/sup.out")"
-ok "auto switch: never cuts a busy session short" 'has "$out" "ENDED CONFIG=unset" && ! has "$out" "continuing" 2>/dev/null'
-ok "auto switch: -p and print mode are left alone" '[ "$(CCP_TEST_TTY=1 ccp run -p 1 -- x)" = "CONFIG=unset ARGS=x" ] && [ "$(CCP_TEST_TTY=1 ccp run -- -p hi)" = "CONFIG=$P/acct-4 ARGS=-p hi" ]'
-ok "auto switch: off without a terminal" '[ "$(ccp run -- x)" = "CONFIG=$P/acct-4 ARGS=x" ]'
-rm -f "$P/default"; : > "$P/full"
-CCP_TEST_TTY=1 CCP_POLL=0.2 ccp run -- --stay > "$T/sup.out" 2>&1 &
-SUP=$!; started "$HOME/.claude/sessions"
-ccp use 3 >/dev/null   # not full: you picked another account
-wait "$SUP"; out="$(cat "$T/sup.out")"
-ok "follow: a session ccp run started moves when you pick another account" 'has "$out" "TERM CONFIG=unset" && has "$out" "ccp: continuing this conversation on #3" && has "$out" "CONFIG=$P/acct-4 ARGS=--resume sid-1"'
+ok "login change: never cuts a busy session short" 'has "$out" "ENDED CONFIG=unset" && ! has "$out" "goes on" 2>/dev/null'
+ok "login change: -p and print mode are left alone" '[ "$(CCP_TEST_TTY=1 ccp run -p 1 -- x)" = "CONFIG=unset ARGS=x" ] && [ "$(CCP_TEST_TTY=1 ccp run -- -p hi)" = "CONFIG=unset ARGS=-p hi" ]'
+ok "login change: off without a terminal" '[ "$(ccp run -- x)" = "CONFIG=unset ARGS=x" ]'
 
-# switching in place from inside the session (a skill or /ccp:switch runs ccp sw there)
-rm -f "$P/default"; : > "$P/full"
+# switching from inside a session (a skill or /ccp:switch runs ccp sw there): the login changes, no session moves
+: > "$P/full"
 STUB_RUN='/bin/bash "$CCP_SRC" sw 3' CCP_SRC="$ROOT/ccp" CCP_TEST_TTY=1 CCP_POLL=0.2 ccp run -- --stay --model m > "$T/sup.out" 2>&1
 out="$(cat "$T/sup.out")"
-ok "sw inside: asks the ccp run around the session" 'has "$(cat "$HOME/stub-run.out")" "switching to #3: when this turn ends"'
-ok "sw inside: the same terminal reopens the conversation on that account" 'has "$out" "TERM CONFIG=unset" && has "$out" "ccp: continuing this conversation on #3" && has "$out" "CONFIG=$P/acct-4 ARGS=--model m --resume sid-1"'
-ok "sw inside: a session started without ccp run says what to do" '! CLAUDECODE=1 ccp sw 3 2>"$T/err" && has "$(cat "$T/err")" "Type /exit, then run: ccp sw 3"'
-mkdir -p "$T/otherrun"; sleep 5 & OTHER=$!; echo "$OTHER" > "$T/otherrun/pid"
-ok "sw inside: never switches a session it does not run in" '! CLAUDECODE=1 CCP_RUN="$T/otherrun" ccp sw 3 2>/dev/null && [ ! -e "$T/otherrun/request" ]'
-kill "$OTHER" 2>/dev/null; wait "$OTHER" 2>/dev/null
+ok "sw inside: puts #3's login in ~/.claude and says the conversation goes on here" 'has "$(cat "$HOME/stub-run.out")" "Claude Code uses #3" && has "$(cat "$HOME/stub-run.out")" "goes on in this terminal" && [ "$(cat "$P/slot")" = acct-4 ]'
+ok "sw inside: the same terminal reopens the conversation in place" 'has "$out" "TERM CONFIG=unset" && has "$out" "CONFIG=unset ARGS=--model m --resume sid-1"'
+ok "sw inside: a session started without ccp is told when it takes the login" 'CLAUDECODE=1 ccp sw 1 > "$T/o" && has "$(cat "$T/o")" "at its next sign-in check" && [ ! -e "$P/slot" ]'
+ok "sw inside: a session on a profile folder of its own keeps that account" 'has "$(CLAUDECODE=1 CLAUDE_CONFIG_DIR="$P/acct-5" ccp sw 3)" "keeps that account" && ccp use 1 >/dev/null'
 
-# a background session (agent view) moves to another account's background
-waitfor() { i=0; while [ ! -s "$1" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done; }
-rm -f "$P/attach" "$HOME/stub.log" "$HOME/stub-run.out"
-echo "{\"projects\": {\"$HOME\": {\"hasTrustDialogAccepted\": true}}}" > "$HOME/.claude.json"
-mkdir -p "$HOME/.claude/jobs/abcd1234" "$HOME/.claude/projects/-home"
-touch "$HOME/.claude/projects/-home/abcd1234-0000.jsonl" "$HOME/.claude/projects/-home/ffff0000-1111.jsonl" "$HOME/.claude/projects/-home/eeee0000-2222.jsonl"
-echo '{"respawnFlags": ["--permission-mode", "bypassPermissions", "--name", "my job", "--model", "m"]}' > "$HOME/.claude/jobs/abcd1234/state.json"
-STUB_KIND=bg STUB_SID=abcd1234-0000 STUB_RUN='export CLAUDE_JOB_DIR=/x/jobs/abcd1234; /bin/bash "$CCP_SRC" sw 3' CCP_SRC="$ROOT/ccp" \
+# background sessions are never stopped or moved: the daemon restarts, leaves them running and hands them the new login
+rm -f "$HOME/stub.log" "$HOME/stub-run.out"; touch "$HOME/daemon-up"
+STUB_KIND=bg STUB_SID=abcd1234-0000 STUB_TICKS=20 STUB_RUN='export CLAUDE_JOB_DIR=/x/jobs/abcd1234; /bin/bash "$CCP_SRC" sw 3' CCP_SRC="$ROOT/ccp" \
   "$CCP_CLAUDE" --stay > "$T/bg.out" 2>&1
-waitfor "$P/attach"
-ok "move: ccp sw inside a background session says what happens" 'has "$(cat "$HOME/stub-run.out")" "moving this session to #3: when this turn ends it continues there"'
-ok "move: ccp sw inside a session picks that account for everything" '[ "$(cat "$P/default")" = acct-4 ]'
-ok "move: stops it on its account, then continues it on the other one (no flags: they would start a copy)" 'grep -q "^stop abcd1234 CONFIG=unset$" "$HOME/stub.log" && grep -q "^bg-resume abcd1234-0000 CONFIG=$P/acct-4 FLAGS=$" "$HOME/stub.log" && has "$(cat "$T/bg.out")" "TERM CONFIG=unset"'
-ok "move: the new account trusts the folder the old one trusted" 'grep -q "hasTrustDialogAccepted" "$P/acct-4/.claude.json" && grep -q oauthAccount "$P/acct-4/.claude.json"'
-ok "move: the old account's list drops it, so it cannot start twice" 'grep -q "^rm abcd1234 CONFIG=unset$" "$HOME/stub.log"'
-ok "move: leaves word for a terminal to follow, and a log" '[ "$(cut -f1-2 "$P/attach")" = "acct-4	abcd1234" ] && grep -q "now on #3" "$P/move.log"'
-ok "attach: opens the moved session on its account" '[ "$(ccp attach)" = "CONFIG=$P/acct-4 ARGS=attach abcd1234" ] && [ ! -e "$P/attach" ]'
-ok "attach <id>: finds the account that runs it" '[ "$(ccp attach abcd1234)" = "CONFIG=$P/acct-4 ARGS=attach abcd1234" ] && ! ccp attach nope 2>/dev/null'
-rm -f "$HOME/stub.log"
-STUB_KIND=bg STUB_SID=ffff0000-1111 STUB_RUN='export CLAUDE_JOB_DIR=/x/jobs/ffff0000; /bin/bash "$CCP_SRC" sw 4' CCP_SRC="$ROOT/ccp" \
-  "$CCP_CLAUDE" --stay > "$T/bg.out" 2>&1
-i=0; while ! grep -q "back on" "$P/move.log" && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
-ok "move: when the other account cannot take it, it goes back where it was" 'grep -q "back on #1" "$P/move.log" && grep -q "^bg-resume ffff0000-1111 CONFIG=unset FLAGS=$" "$HOME/stub.log" && [ ! -e "$P/attach" ]'
-ok "move: and remembers, so following does not retry it at once" '[ "$(cat "$P/moving/ffff0000.failed" 2>/dev/null)" = acct-5 ]'
-rm -f "$HOME/stub.log"
-STUB_KIND=bg STUB_SID=eeee0000-2222 STUB_RUN='export CLAUDE_JOB_DIR=/x/jobs/eeee0000; /bin/bash "$CCP_SRC" sw 5' CCP_SRC="$ROOT/ccp" \
-  "$CCP_CLAUDE" --stay > "$T/bg.out" 2>&1
-i=0; while [ "$(grep -c "back on" "$P/move.log")" -lt 2 ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
-ok "move: comes up and then fails on the other account: back where it was" '[ "$(grep -c "back on #1" "$P/move.log")" = 2 ] && grep -q "^bg-resume eeee0000-2222 CONFIG=unset FLAGS=$" "$HOME/stub.log"'
-rm -f "$HOME/stub.log"
-STUB_KIND=bg STUB_SID=dddd0000-3333 STUB_RUN='export CLAUDE_JOB_DIR=/x/jobs/dddd0000; /bin/bash "$CCP_SRC" sw 3' CCP_SRC="$ROOT/ccp" STUB_TICKS=30 \
-  "$CCP_CLAUDE" --stay > "$T/bg.out" 2>&1
-ok "move: a session with no saved conversation stays put" 'grep -q "nothing to move" "$P/move.log" && ! grep -q "^stop dddd0000" "$HOME/stub.log" 2>/dev/null && has "$(cat "$T/bg.out")" "ENDED"'
-
-# one account at a time: background sessions on another account follow the one in use
-rm -f "$P/default" "$HOME/stub.log"; rm -rf "$P/moving"
-mkdir -p "$HOME/ruled" "$T/wt"; ccp here 1 "$HOME/ruled" >/dev/null
-touch "$HOME/.claude/projects/-home/cccc0000-4444.jsonl"
-STUB_KIND=bg STUB_SID=cccc0000-4444 "$CCP_CLAUDE" --stay > "$T/bg.out" 2>&1 &
-BG=$!; sleep 30 & RULED=$!; sleep 0.3
-printf '[{"pid": %s, "id": "cccc0000", "sessionId": "cccc0000-4444", "cwd": "%s", "kind": "background", "status": "idle"}, {"pid": %s, "id": "bbbb0000", "sessionId": "bbbb0000-5555", "cwd": "%s", "kind": "background"}, {"pid": 999999, "id": "aaaa0000", "sessionId": "aaaa0000-6666", "cwd": "%s", "kind": "background"}]\n' \
-  "$BG" "$T/wt" "$RULED" "$HOME/ruled" "$HOME" > "$HOME/.claude/stub-agents.json"
-out="$(ccp use 3)"
-i=0; while ! grep -q "^bg-resume cccc0000" "$HOME/stub.log" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
-wait "$BG" 2>/dev/null
-ok "use: running background sessions follow the account you pick" 'has "$out" "1 running session(s) move to #3 when their turn ends" && grep -q "^stop cccc0000 CONFIG=unset$" "$HOME/stub.log" && grep -q "^bg-resume cccc0000-4444 CONFIG=$P/acct-4 FLAGS=$" "$HOME/stub.log"'
-ok "use: a folder rule keeps a session on its account; a closed one is left alone" '! grep -q "bbbb0000\|aaaa0000" "$HOME/stub.log"'
-i=0; while [ -d "$P/moving/cccc0000" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
-ok "follow: a finished move lets go of its lock" '[ ! -d "$P/moving/cccc0000" ]'
-ok "move: a folder the old account runs in without its own entry (a worktree) is trusted on the new one" 'grep -q "\"$T/wt\"" "$P/acct-4/.claude.json"'
-sleep 30 & GONE=$!
-echo acct-4 > "$P/moving/ffff2222.failed"
-printf '[{"pid": %s, "id": "ffff2222", "sessionId": "ffff2222-9999", "cwd": "%s", "kind": "background"}]\n' "$GONE" "$HOME" > "$HOME/.claude/stub-agents.json"
-ok "follow: an account that could not take a session lately is not tried every minute" '! has "$(ccp use 3)" "running session" 2>/dev/null && [ ! -d "$P/moving/ffff2222" ]'
-kill "$GONE" 2>/dev/null; wait "$GONE" 2>/dev/null; rm -f "$P/moving/ffff2222.failed"
-kill "$RULED" 2>/dev/null; wait "$RULED" 2>/dev/null; ccp here --rm "$HOME/ruled" >/dev/null
-rm -f "$HOME/stub.log"
-touch "$HOME/.claude/projects/-home/dddd1111-7777.jsonl"
-STUB_KIND=bg STUB_SID=dddd1111-7777 STUB_STATUS=busy STUB_TICKS=30 "$CCP_CLAUDE" --stay > "$T/bg.out" 2>&1 &
-BG=$!; sleep 0.3
-printf '[{"pid": %s, "id": "dddd1111", "sessionId": "dddd1111-7777", "cwd": "%s", "kind": "background"}]\n' "$BG" "$HOME" > "$HOME/.claude/stub-agents.json"
-out="$(ccp use 3)"; out2="$(ccp use 3)"
-ok "follow: one move per session, however often it is asked" 'has "$out" "1 running session(s)" && ! has "$out2" "running session" 2>/dev/null'
-wait "$BG" 2>/dev/null
-i=0; while ! grep -q "ended on its own" "$P/move.log" && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
-ok "follow: a session that closes while it waits is not started again" 'grep -q "it ended on its own; nothing to move" "$P/move.log" && ! grep -q "dddd1111" "$HOME/stub.log" 2>/dev/null'
-touch "$HOME/.claude/projects/-home/eeee1111-8888.jsonl"; mkdir -p "$HOME/.claude/jobs/eeee1111"
-echo '{"inFlight": {"tasks": 1, "queued": 0}}' > "$HOME/.claude/jobs/eeee1111/state.json"
-STUB_KIND=bg STUB_SID=eeee1111-8888 STUB_TICKS=80 "$CCP_CLAUDE" --stay > "$T/bg.out" 2>&1 &
-BG=$!; sleep 0.3
-printf '[{"pid": %s, "id": "eeee1111", "sessionId": "eeee1111-8888", "cwd": "%s", "kind": "background"}]\n' "$BG" "$HOME" > "$HOME/.claude/stub-agents.json"
-ccp use 1 >/dev/null; ccp use 3 >/dev/null; sleep 1.5
-ok "follow: waits for the work a background job left running (a build, a shell)" '! grep -q "eeee1111" "$HOME/stub.log" 2>/dev/null'
-echo '{"inFlight": {"tasks": 2, "queued": 0, "kinds": ["artifact_watch"], "drainableMonitors": 2}}' > "$T/watch-only.json"
-mkdir -p "$T/cfgw/jobs/w1" && cp "$T/watch-only.json" "$T/cfgw/jobs/w1/state.json"
-sed -n '/^job_busy() {/,/^}/p' "$ROOT/ccp" > "$T/job_busy.sh"
-mkdir -p "$T/cfgw/jobs/w2" && echo '{"inFlight": {"tasks": 3, "queued": 0, "kinds": ["artifact_watch", "local_bash"], "drainableMonitors": 2}}' > "$T/cfgw/jobs/w2/state.json"
-ok "follow: watching an artifact's comments is not work to wait for; a shell is" '( . "$T/job_busy.sh"; type job_busy >/dev/null && ! job_busy "$T/cfgw" w1 && job_busy "$T/cfgw" w2 )'
-ccp use 1 >/dev/null
-echo '{"inFlight": {"tasks": 0, "queued": 0}}' > "$HOME/.claude/jobs/eeee1111/state.json"
-i=0; while ! grep -q "changed meanwhile" "$P/move.log" && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
-ok "follow: when you pick another account meanwhile, the old move stays put" 'grep -q "the account in use changed meanwhile; left it on #1" "$P/move.log" && ! grep -q "eeee1111" "$HOME/stub.log" 2>/dev/null'
-kill "$BG" 2>/dev/null; wait "$BG" 2>/dev/null
-rm -f "$HOME/.claude/stub-agents.json"
-
-rm -f "$P/default"; : > "$P/full"; printf 'acct-4\tabcd1234\t%s\n' "$(date +%s)" > "$P/attach"
-CCP_TEST_TTY=1 CCP_POLL=0.2 ccp run -- --stay > "$T/sup.out" 2>&1
-ok "move: a terminal that runs claude through ccp follows it to the new account" 'has "$(cat "$T/sup.out")" "ccp: opening session abcd1234 on #3" && has "$(cat "$T/sup.out")" "CONFIG=$P/acct-4 ARGS=attach abcd1234" && [ ! -e "$P/attach" ]'
+ok "sw inside a background session: the login changes, the session runs on where it is" 'has "$(cat "$HOME/stub-run.out")" "Claude Code uses #3" && has "$(cat "$T/bg.out")" "ENDED" && ! grep -q "^stop \|^bg-resume\|^rm " "$HOME/stub.log"'
+ok "readopt: the daemon restarts with its sessions left running, and adopts them again" 'grep -q "^daemon stop --any --keep-workers CONFIG=unset$" "$HOME/stub.log" && grep -q "^agents CONFIG=unset$" "$HOME/stub.log" && has "$(cat "$HOME/stub-run.out")" "background sessions took it too"'
+rm -f "$HOME/daemon-up" "$HOME/stub.log"; ccp use 1 >/dev/null
+ok "readopt: no daemon running, nothing to restart" '! grep -q "daemon stop" "$HOME/stub.log" 2>/dev/null'
 rm -f "$P/full"
 
 # the status line: every account, its limits and when each resets, as ccp watch last saw them
@@ -346,10 +275,11 @@ mkdir -p "$T/two/acct-2" && echo isolated=0 > "$T/two/acct-2/.ccp" && printf 'de
 sed -n "1p;3p" "$P/seen" | sed "s/^acct-4/acct-2/" > "$T/two/seen"
 ok "status line: two accounts, both in full" '[ "$(NO_COLOR=1 CCP_HOME="$T/two" CCP_ACTIVE=default ccp prompt --usage)" = " ▶ #1 this session   week 98% (resets in 4d 15h)  ┃  #2  5h 3% (resets in 4h 49m)  week 17% (resets in 5d 21h)" ]'
 ok "status line: a Claude Code started without ccp finds its account by its folder" 'has "$(NO_COLOR=1 CLAUDECODE=1 CLAUDE_CONFIG_DIR="$P/acct-4" ccp prompt --usage)" "▶ #3 this session"'
-echo acct-4 > "$P/default"
-ok "status line: one account, no separate part for new sessions" '! has "$(NO_COLOR=1 CCP_ACTIVE=default ccp prompt --usage)" "new sessions" 2>/dev/null'
+echo acct-4 > "$P/slot"
+ok "status line: a session on ~/.claude is on the account whose login ~/.claude holds" 'has "$(NO_COLOR=1 CCP_ACTIVE=default ccp prompt --usage)" "▶ #3 this session" && [ "$(CCP_ACTIVE=default ccp prompt)" = "#3" ]'
+rm -f "$P/slot"
 ok "status line: colors by how full" 'has "$(CCP_ACTIVE=default ccp prompt --usage)" "$(printf "\033[31m98%%")" && has "$(CCP_ACTIVE=default ccp prompt --usage)" "$(printf "\033[32m17%%")"'
-rm -f "$P/default" "$P/full" "$P/seen"
+rm -f "$P/full" "$P/seen"
 ok "status line: without ccp service, just the accounts" 'has "$(NO_COLOR=1 CCP_ACTIVE=acct-4 ccp prompt --usage)" "#1  ┃  #2  ┃   ▶ #3 this session   ┃  #4"'
 
 # ccp service: a launchd job (launchctl stubbed)

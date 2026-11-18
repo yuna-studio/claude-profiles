@@ -64,7 +64,7 @@ ccp add                           # #3
 ccp add -2                        # a new one at #2; the old #2 and #3 become #3 and #4
 ccp add work --email me@company.com   # a name is optional; numbers always work
 
-ccp use 2                         # account #2 everywhere
+ccp use 2                         # ~/.claude takes #2's login; sessions stay where they are
 ccp here 3 ~/client-x             # ~/client-x and everything in it uses #3
 ccp mv 4 2                        # reorder
 ccp which                         # which account a run here would use, and why
@@ -77,9 +77,10 @@ ccp run -p 2 -- -c                # or a given one, with any claude arguments
 echo 'eval "$(ccp init zsh)"' >> ~/.zshrc   # optional: plain `claude` follows your profiles
 ```
 
-`#1` is your normal `~/.claude`, untouched. Which account a run uses: `CCP_PROFILE` (number or name) › the longest
-folder rule that covers the current folder › `ccp use` › `#1`. Rules and `ccp use` remember the account, not the number,
-so they keep pointing at the same account when you insert or move profiles.
+`#1` is your normal `~/.claude`. Which folder a run uses: `CCP_PROFILE` (number or name) › the longest folder rule that
+covers the current folder › `~/.claude`. `ccp use` picks no folder: it changes the login `~/.claude` holds (below).
+Rules and `ccp use` remember the account, not the number, so they keep pointing at the same account when you insert or
+move profiles.
 
 | command | does |
 |---|---|
@@ -87,13 +88,13 @@ so they keep pointing at the same account when you insert or move profiles.
 | `ccp ls` | profiles by number, their account and plan, folder rules |
 | `ccp usage [--json]` | each account's limits: used, left, when they reset |
 | `ccp top [--every 60]` | the same, live in the terminal (`r` refresh, `q` quit) |
-| `ccp use <n\|name>` | the account in use; running sessions follow it (`ccp use 1` goes back to `~/.claude`) |
+| `ccp use <n\|name>` | that account's login in `~/.claude`; every session stays where it is and uses it (`ccp use 1`: #1's own) |
 | `ccp here <n\|name> [dir]` · `ccp here --rm [dir]` | folder rule |
 | `ccp mv <n\|name> <N>` | move a profile to number N |
 | `ccp which [dir]` | profile for a folder, and why |
 | `ccp run [-p n\|name] [-- claude args]` | run Claude Code with a profile |
-| `ccp sw <n\|name> [-- claude args]` | that account from now on, and the last conversation here continues on it (`--continue`) |
-| `ccp service start [--at 100] [--every 60]` · `stop` · `status` | in the background: move to the next account when the one in use is full |
+| `ccp sw <n\|name> [-- claude args]` | `ccp use n`, then the last conversation here goes on (`--continue`) |
+| `ccp service start [--at 100] [--every 60]` · `stop` · `status` | in the background: the next account's login when the one in use is full |
 | `ccp watch [--at 100] [--every 60]` | the same in this terminal |
 | `ccp env [n\|name]` | `eval "$(ccp env 2)"` pins the current shell |
 | `ccp login <n\|name>` | sign a profile in again |
@@ -103,30 +104,28 @@ so they keep pointing at the same account when you insert or move profiles.
 
 ## Switch accounts while you work
 
-A running Claude Code stays on the account it started with. To move to another one, leave and come back on it:
-
 ```sh
-/exit                 # in Claude Code
-ccp sw 2              # the same conversation (the last one in this folder) continues on account #2
-ccp sw work -- --resume   # or pick a conversation
+ccp use 2             # ~/.claude takes account #2's login; every session stays where it is and uses it
+ccp use 1             # #1's own login back
+ccp sw 2              # ccp use 2, then the last conversation in this folder goes on (--continue)
 ```
 
-Nothing is lost: conversation history is shared between profiles. Inside Claude Code, `! ccp ls` shows the accounts.
+Inside Claude Code: ask Claude to switch accounts (the plugin's `switch-account` skill), type `/ccp:switch 2`, or
+`! ccp sw 2`.
 
-**One account at a time.** `ccp use 2`, `ccp sw 2` and `/ccp:switch 2` all pick the account in use, and running sessions
-follow it: this one, new ones, and the background sessions on other accounts, each once its turn ends and the work it
-left running (a build, a monitor) is done. A session on a folder rule (`ccp here`) stays on that account.
+**Nothing moves.** Claude Code reads its login from `~/.claude`'s keychain item (`.credentials.json` on Linux). `ccp use`
+puts the chosen account's login there and keeps #1's own aside (keychain item `ccp-stash-default`), so every session
+stays in its list, its folder and its terminal; only the account its tokens come from changes. MCP sign-ins in
+`~/.claude` stay as they are. Meanwhile the lent account keeps no renewable copy in its own folder (two copies renewing
+one login would sign one of them out); it gets the freshest copy back when you switch away from it.
 
-**Background sessions** (`claude --bg`, the agent view): `/ccp:switch 2` or `! ccp sw 2` inside one stops it
-on its account when the turn ends and continues it, same id and conversation, in #2's background (the folder's trust comes
-along; if #2 cannot take it, it goes back). A terminal that runs `claude` through `ccp` opens it there by itself;
-otherwise `ccp attach` does. Claude Code keeps a background session's launch options per account, so the first move
-starts it with that account's defaults.
-
-
-**In place**, while `ccp service` is on and the session was started with `ccp run` (or `claude` after `ccp init`): ask
-Claude to switch accounts (the plugin's `switch-account` skill), type `/ccp:switch 2`, or `! ccp sw 2`. When the turn ends,
-the same conversation reopens on #2 in the same terminal, in a couple of seconds and without signing in.
+- **Background sessions** (`claude --bg`, the agent view) get their token from Claude Code's daemon, which reads the login
+  when it starts. `ccp use` restarts the daemon with `claude daemon stop --keep-workers`, which leaves the sessions
+  running, and the new daemon hands the new login to each one it adopts. No session stops.
+- **A terminal session** started with `ccp run` (or `claude` after `ccp init`) while `ccp service` is on reopens the same
+  conversation in the same terminal once it is idle (`claude --resume`, options such as `--model` kept). A terminal
+  that started `claude` without `ccp` takes the login at its next sign-in check (`/exit`, `claude --continue` takes it now).
+- A session on a folder rule (`ccp here`), `-p` or `CCP_PROFILE` keeps its own account's folder and login.
 
 To see every account's limits under the prompt, put `ccp prompt --usage` in Claude Code's status line (`~/.claude/settings.json`):
 
@@ -138,7 +137,7 @@ To see every account's limits under the prompt, put `ccp prompt --usage` in Clau
 ▶ #2 this session  5h 3% (resets in 4h 49m)  week 17% (resets in 5d 21h)  ┃  #1  week 98% (resets in 4d 15h)
 ```
 
-`▶` marks the account this session runs on (sessions follow the account in use, so there is no separate "new sessions" part); the numbers are what `ccp service` saw in its last check (no service: just the
+`▶` marks the account this session runs on (on `~/.claude`: the account whose login it holds); the numbers are what `ccp service` saw in its last check (no service: just the
 accounts). Plain `ccp prompt` prints `#2 work`, for a shell prompt or a status line script you already have.
 
 ## Move on when an account is full
@@ -152,16 +151,10 @@ ccp service status             # running?, the account in use, full accounts, la
 ccp service stop
 ```
 
-Every minute it reads each account's usage (as `ccp top` does). When the account in use (`ccp use`, or #1) reaches 100%
-of its 5-hour or weekly limit, it makes the next account with room the one in use and shows a notification. When the
-first account has room again, it goes back to it.
-
-Running sessions follow, as with `ccp use`. A session started with `ccp run` (or plain `claude` after `ccp init`): once
-Claude Code stops at the limit and the session is idle, `ccp` ends it and continues the same conversation on the new
-account (`claude --resume <that session>`, with options such as `--model` kept). A background session moves to the new
-account's background the same way. A session that is busy (a turn, a tool, a question, background work) is never cut
-short. Sessions on a folder rule, `-p` or `CCP_PROFILE` stay where you put them, and so do terminals that started
-`claude` without `ccp` (open a new one after `ccp setup`) and the desktop app.
+Every minute it reads each account's usage (as `ccp top` does). When the account in use (the one whose login `~/.claude`
+holds) reaches 100% of its 5-hour or weekly limit, `~/.claude` takes the login of the next account with room, as with
+`ccp use`, and it shows a notification. When the first account has room again (or, kept aside, its limit has reset),
+its login goes back. Sessions stay where they are, as above; a busy one (a turn, a tool, a question) is never cut short.
 
 Elsewhere (Linux), keep `ccp watch` running under systemd `--user` or tmux. The log is `~/.claude-profiles/watch.log`.
 
