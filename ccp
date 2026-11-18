@@ -255,7 +255,7 @@ print((json.load(open(os.path.expanduser("~/.claude.json"))).get("oauthAccount")
     say ""; say "folder rules:"
     while IFS="$TAB" read -r p id; do [ -n "$p" ] && printf '  %s → %s\n' "$p" "$(label "$id")"; done < "$CCP_HOME/rules"
   fi
-  [ "$h" != default ] && { say ""; say "~/.claude holds $(label "$h")'s login; #1's own is kept aside (ccp use 1 brings it back)"; }
+  [ "$h" != default ] && { say ""; say "#1's own login is kept aside; ~/.claude holds $(label "$h")'s (ccp use 1 brings #1's back)"; }
   say ""; say "* used here ($(resolve . | cut -f2))"
 }
 
@@ -348,6 +348,7 @@ EOF
 
 cmd__respawn() {   # ccp _respawn <pid> <short id>: wait until that background session is idle, then restart it in place
   local pid="$1" short="$2" n=0 st c
+  # shellcheck disable=SC2064  # expanded now on purpose: the locals are gone when the trap runs
   trap "rmdir $(printf '%q' "$CCP_HOME/respawning/$short") 2>/dev/null" EXIT   # respawn_running's lock
   c="$(real_claude)" || exit 1
   while kill -0 "$pid" 2>/dev/null; do   # the turn ends first, and the work it left running in the background
