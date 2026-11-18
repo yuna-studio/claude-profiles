@@ -556,6 +556,7 @@ cmd__move() {   # ccp _move <from> <to> <pid> <sessionId> <short id> <cwd> [foll
   fi
   trust_dir "$from" "$to" "$cwd"
   cd "$cwd" 2>/dev/null || cd "$HOME" || exit 1
+  trap '' TERM INT HUP   # from here it is stopped on one account and not yet up on the other: never end halfway
   with_profile "$from" "$c" stop "$short" >/dev/null 2>&1
   n=0; while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 20 ]; do sleep 1; n=$((n + 1)); done
   if kill -0 "$pid" 2>/dev/null; then say "  could not stop it; left it on $(label "$from")"; echo "$to" > "$CCP_HOME/moving/$short.failed"; return 1; fi   # never two copies
