@@ -136,10 +136,13 @@ To see every account's limits under the prompt, put `ccp prompt --usage` in Clau
 ```
 
 ```
-▶ #2 this session  5h 3% (resets in 4h 49m)  week 17% (resets in 5d 21h)  ┃  #1  week 98% (resets in 4d 15h)
+#1                           │   ▶ #2 this session
+5h    ··········    -        │  5h    ▊░░░░░░░░░   7%    8m
+week  █████████▉  99%  4d3h  │  week  █▊░░░░░░░░  18%  5d9h
+Fable ░░░░░░░░░░   0%  4d3h  │  Fable ░░░░░░░░░░   0%  5d9h
 ```
 
-`▶` marks the account this session runs on (on `~/.claude`: the account whose login it holds); the numbers are what `ccp service` saw in its last check (no service: just the
+A column per account and a row per limit (5-hour, week, a model's own week such as Fable): a bar filled in eighths, the percent in soft green, orange or red, and the time to reset on the right. `▶` marks the account this session runs on (on `~/.claude`: the account whose login it holds); the numbers are what `ccp service` saw in its last check (no service: just the
 accounts). Plain `ccp prompt` prints `#2 work`, for a shell prompt or a status line script you already have.
 
 ## Move on when an account is full

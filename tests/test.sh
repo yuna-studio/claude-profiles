@@ -202,7 +202,7 @@ out="$(ccp usage)"
 ok "usage: with #3's login in ~/.claude each account still shows its own numbers, #3 used here" 'has "$out" " 91%     9%" && has "$out" " 12%    88%" && has "$out" "* 3 "'
 ok "run: the folder stays ~/.claude, whichever login it holds" '[ "$(ccp run -- x)" = "CONFIG=unset ARGS=x" ] && [ "$(ccp run -p 3 -- x)" = "CONFIG=unset ARGS=x" ]'
 ok "watch: lists full accounts for running sessions" 'grep -q "^default	5-hour	91	" "$P/full"'
-ok "watch: keeps what it saw for ccp service status" 'grep -q "^default	5-hour 91%, week 48%	5h:91:[0-9]* wk:48:[0-9]*$" "$P/seen" && grep -q "^acct-3	not logged in	$" "$P/seen" && has "$(ccp service status)" "  #1 default: 5-hour 91%, week 48%"'
+ok "watch: keeps what it saw for ccp service status" 'grep -q "^default	5-hour 91%, week 48%	5h:91:[0-9]* wk:48:[0-9]* m.Fable:0:[0-9]*$" "$P/seen" && grep -q "^acct-3	not logged in	$" "$P/seen" && has "$(ccp service status)" "  #1 default: 5-hour 91%, week 48%"'
 python3 - "$HOME/.claude/.credentials.json" <<'EOF'   # Claude Code renews #3's login while it is in ~/.claude
 import json, sys; d = json.load(open(sys.argv[1])); d["claudeAiOauth"]["refreshToken"] = "rt-3b"; json.dump(d, open(sys.argv[1], "w"))
 EOF
@@ -281,24 +281,28 @@ ok "use: a session that ends while it waits is not started again, and its waiter
 kill "$IDLE" 2>/dev/null; wait "$IDLE" 2>/dev/null; rm -f "$HOME/.claude/stub-agents.json"; ccp use 1 >/dev/null
 rm -f "$P/full"
 
-# the status line: every account, its limits and when each resets, as ccp watch last saw them
+# the status line: a column per account, a row per limit (a bar in eighths, the percent, time left), as ccp watch saw them
 now=$(date +%s)
-printf 'default\tweek 98%%\twk:98:%s\nacct-3\tnot logged in\t\nacct-4\t5-hour 3%%, week 17%%\t5h:3:%s wk:17:%s\nacct-5\tsign-in expired: open #4 once\t\n' \
-  $((now + 4 * 86400 + 15 * 3600 + 90)) $((now + 4 * 3600 + 49 * 60 + 20)) $((now + 5 * 86400 + 21 * 3600 + 90)) > "$P/seen"
+printf 'default\tweek 98%%\twk:98:%s m.Fable:0:%s\nacct-3\tnot logged in\t\nacct-4\t5-hour 3%%, week 17%%\t5h:3:%s wk:17:%s\nacct-5\tsign-in expired: open #4 once\t\n' \
+  $((now + 4 * 86400 + 15 * 3600 + 90)) $((now + 4 * 86400 + 15 * 3600 + 90)) $((now + 4 * 3600 + 49 * 60 + 20)) $((now + 5 * 86400 + 21 * 3600 + 90)) > "$P/seen"
 out="$(NO_COLOR=1 CCP_ACTIVE=default ccp prompt --usage)"
-ok "status line: this session's account stands out" 'has "$out" " ▶ #1 this session " && ! has "$out" "▶ #3" 2>/dev/null'
-ok "status line: every account and when each limit resets, short for the others when there are many" 'has "$out" "week 98% (resets in 4d 15h)  ┃  #2  signed out  ┃  #3 5h 3%(4h) week 17%(5d)  ┃  #4  checking  ┃  #5  checking  ┃  #6  checking"'
-ok "status line: in Korean" 'has "$(NO_COLOR=1 CCP_LANG=ko CCP_ACTIVE=acct-4 ccp prompt --usage)" "#1 주간 98%(4일)  ┃  #2  로그인 필요  ┃   ▶ #3 이 세션   5시간 3% (4시간 49분 뒤 리셋)  주간 17% (5일 21시간 뒤 리셋)"'
+row() { printf '%s\n' "$out" | sed -n "$1p"; }
+ok "status line: a header row, this session's account stands out" 'has "$(row 1)" " ▶ #1 this session " && has "$(row 1)" "#3" && ! has "$out" "▶ #3" 2>/dev/null'
+ok "status line: the same limit on the same row in every column, with time left" 'has "$(row 2)" "5h    ··········    -" && has "$(row 2)" "5h    ▎░░░░░░░░░   3%  4h49m" && has "$(row 3)" "week  █████████▊  98%  4d15h" && has "$(row 3)" "week  █▊░░░░░░░░  17%  5d21h" && has "$(row 4)" "Fable ░░░░░░░░░░   0%  4d15h"'
+ok "status line: an account without numbers says why" 'has "$(row 2)" "signed out" && has "$(row 2)" "checking"'
+ok "status line: in Korean" 'has "$(NO_COLOR=1 CCP_LANG=ko CCP_ACTIVE=acct-4 ccp prompt --usage)" "▶ #3 이 세션" && has "$(NO_COLOR=1 CCP_LANG=ko CCP_ACTIVE=acct-4 ccp prompt --usage)" "로그인 필요"'
 mkdir -p "$T/two/acct-2" && echo isolated=0 > "$T/two/acct-2/.ccp" && printf 'default\nacct-2\n' > "$T/two/order"
 sed -n "1p;3p" "$P/seen" | sed "s/^acct-4/acct-2/" > "$T/two/seen"
-ok "status line: two accounts, both in full" '[ "$(NO_COLOR=1 CCP_HOME="$T/two" CCP_ACTIVE=default ccp prompt --usage)" = " ▶ #1 this session   week 98% (resets in 4d 15h)  ┃  #2  5h 3% (resets in 4h 49m)  week 17% (resets in 5d 21h)" ]'
+out="$(NO_COLOR=1 CCP_HOME="$T/two" CCP_ACTIVE=default ccp prompt --usage)"
+ok "status line: two accounts, four rows" '[ "$(printf "%s\n" "$out" | wc -l | tr -d " ")" = 4 ] && has "$(row 1)" "│   #2" 2>/dev/null || has "$(row 1)" "#2"'
 ok "status line: a Claude Code started without ccp finds its account by its folder" 'has "$(NO_COLOR=1 CLAUDECODE=1 CLAUDE_CONFIG_DIR="$P/acct-4" ccp prompt --usage)" "▶ #3 this session"'
 echo acct-4 > "$P/slot"
 ok "status line: a session on ~/.claude is on the account whose login ~/.claude holds" 'has "$(NO_COLOR=1 CCP_ACTIVE=default ccp prompt --usage)" "▶ #3 this session" && [ "$(CCP_ACTIVE=default ccp prompt)" = "#3" ]'
 rm -f "$P/slot"
-ok "status line: colors by how full" 'has "$(CCP_ACTIVE=default ccp prompt --usage)" "$(printf "\033[31m98%%")" && has "$(CCP_ACTIVE=default ccp prompt --usage)" "$(printf "\033[32m17%%")"'
+out="$(CCP_ACTIVE=default ccp prompt --usage)"
+ok "status line: soft colors by how full, on a grey track" 'has "$out" "$(printf "\033[38;5;167m 98%%")" && has "$out" "$(printf "\033[38;5;108m 17%%")" && has "$out" "48;5;237m"'
 rm -f "$P/full" "$P/seen"
-ok "status line: without ccp service, just the accounts" 'has "$(NO_COLOR=1 CCP_ACTIVE=acct-4 ccp prompt --usage)" "#1  ┃  #2  ┃   ▶ #3 this session   ┃  #4"'
+ok "status line: without ccp service, just the accounts" '[ "$(NO_COLOR=1 CCP_ACTIVE=acct-4 ccp prompt --usage | wc -l | tr -d " ")" = 0 ] && has "$(NO_COLOR=1 CCP_ACTIVE=acct-4 ccp prompt --usage)" "#1" && has "$(NO_COLOR=1 CCP_ACTIVE=acct-4 ccp prompt --usage)" "▶ #3 this session"'
 
 # ccp service: a launchd job (launchctl stubbed)
 printf '%s\n' '#!/bin/bash' 'echo "$*" >> "$HOME/launchctl.log"' \

@@ -1130,8 +1130,11 @@ def watch():
         if transient(r) and r["id"] in before:
             return before[r["id"]]
         ls = [l for l in r["limits"] if l["name"] in ("5-hour", "week")]
+        ms = [l for l in r["limits"] if l["name"].startswith("week · ")]   # a model's own weekly limit (Fable)
+        def key(l):
+            return "5h" if l["name"] == "5-hour" else "wk" if l["name"] == "week" else "m." + l["name"][7:].replace(" ", "_")
         text = r["error"] or ", ".join(f"{l['name']} {l['used']:.0f}%" for l in ls) or "no limits reported"
-        return f"{r['id']}\t{text}\t" + " ".join(f"{'5h' if l['name'] == '5-hour' else 'wk'}:{l['used']:.0f}:{int(l['resets'] or 0)}" for l in ls) + "\n"
+        return f"{r['id']}\t{text}\t" + " ".join(f"{key(l)}:{l['used']:.0f}:{int(l['resets'] or 0)}" for l in ls + ms) + "\n"
     write("seen", "".join(seen(r) for r in results))   # what this check saw
     if any((r["error"] or "").startswith("asked too often") for r in results):   # back off: ask half as often, up to 10 min
         write("backoff", str(min(600, max(int(read("backoff") or 0), EVERY) * 2)))
@@ -1330,65 +1333,118 @@ cmd_setup() {   # ccp setup [--undo] [--no-shell] [--no-statusline] [--no-plugin
   say "next: ccp add (sign in another account once) · open a new terminal · ccp ls"
 }
 
-dur() {   # dur <seconds>: "4d 15h", "4h 49m", "12m" (or 4일 15시간 … in Korean)
-  local s="$1" d h m
-  [ "$s" -gt 0 ] 2>/dev/null || s=0
-  d=$((s / 86400)); h=$((s % 86400 / 3600)); m=$((s % 3600 / 60))
-  if [ "${3:-}" = short ]; then   # the largest unit only: 5일, 4h, 39분
-    if [ "${2:-}" = ko ]; then
-      if [ "$d" -gt 0 ]; then printf '%s일' "$d"; elif [ "$h" -gt 0 ]; then printf '%s시간' "$h"; else printf '%s분' "$m"; fi
-    elif [ "$d" -gt 0 ]; then printf '%sd' "$d"; elif [ "$h" -gt 0 ]; then printf '%sh' "$h"; else printf '%sm' "$m"; fi
-  elif [ "${2:-}" = ko ]; then
-    if [ "$d" -gt 0 ]; then printf '%s일 %s시간' "$d" "$h"; elif [ "$h" -gt 0 ]; then printf '%s시간 %s분' "$h" "$m"; else printf '%s분' "$m"; fi
-  else
-    if [ "$d" -gt 0 ]; then printf '%sd %sh' "$d" "$h"; elif [ "$h" -gt 0 ]; then printf '%sh %sm' "$h" "$m"; else printf '%sm' "$m"; fi
-  fi
+status_line() {   # status_line <id of this session>: a column per account, a row per limit (bar, percent, time to reset),
+                  # as ccp watch last saw them
+  local fresh=0 ko=0
+  [ -n "$(find "$CCP_HOME/seen" -mmin -15 2>/dev/null)" ] && fresh=1
+  case "${CCP_LANG:-${LC_ALL:-${LANG:-}}}" in ko*) ko=1 ;; esac
+  CCP_ROWS="$(usage_rows)" CCP_THIS="${1:-}" CCP_FRESH="$fresh" CCP_SEEN="$CCP_HOME/seen" CCP_KO="$ko" python3 -c "$STATUS_PY"
 }
 
-status_line() {   # status_line <id of this session>: every account with its limits and resets as ccp watch last saw them
-  local lang=en now fresh=0 id i=0 out="" seg line text detail tok name rest used reset short=0
-  local on="" off="" bold="" dim="" red="" yellow="" green="" w_this="this session" w_5h="5h" w_wk="week"
-  local w_wait="checking" w_out="signed out"
-  case "${CCP_LANG:-${LC_ALL:-${LANG:-}}}" in ko*) lang=ko; w_this="이 세션"; w_5h="5시간"; w_wk="주간"; w_wait="확인 중"; w_out="로그인 필요" ;; esac
-  if [ -z "${NO_COLOR:-}" ]; then
-    on="$(printf '\033[1;7m')"; off="$(printf '\033[0m')"; bold="$(printf '\033[1m')"; dim="$(printf '\033[2m')"
-    red="$(printf '\033[31m')"; yellow="$(printf '\033[33m')"; green="$(printf '\033[32m')"
-  fi
-  now="$(date +%s)"
-  [ -n "$(find "$CCP_HOME/seen" -mmin -15 2>/dev/null)" ] && fresh=1
-  [ "$(ids | wc -l | tr -d ' ')" -ge 3 ] && short=1   # 3+ accounts: the others get one short line each
-  for id in $(ids); do
-    i=$((i + 1)); text=""; detail=""
-    if [ "$fresh" = 1 ]; then
-      line="$(awk -F '\t' -v id="$id" '$1 == id { print $2 "\t" $3; exit }' "$CCP_HOME/seen")"
-      if [ -n "$line" ]; then text="${line%%"$TAB"*}"; detail="${line#*"$TAB"}"; fi
-    fi
-    if [ "$id" = "$1" ]; then seg="${on} ▶ #${i} ${w_this} ${off}"; else seg="${bold}#${i}${off}"; fi
-    if [ -n "$detail" ]; then
-      for tok in $detail; do   # 5h:3:1795012345
-        name="${tok%%:*}"; rest="${tok#*:}"; used="${rest%%:*}"; reset="${rest#*:}"
-        case "${name}" in 5h) name="${w_5h}" ;; *) name="${w_wk}" ;; esac
-        if [ "${used}" -ge 90 ] 2>/dev/null; then used="${red}${used}%${off}"
-        elif [ "${used}" -ge 70 ] 2>/dev/null; then used="${yellow}${used}%${off}"
-        else used="${green}${used}%${off}"; fi
-        if [ "$short" = 1 ] && [ "$id" != "$1" ]; then seg="${seg} ${name} ${used}"; else seg="${seg}  ${name} ${used}"; fi
-        if [ "${reset:-0}" -gt 0 ] 2>/dev/null; then
-          if [ "$short" = 1 ] && [ "$id" != "$1" ]; then seg="${seg}${dim}($(dur $((reset - now)) "$lang" short))${off}"
-          elif [ "$lang" = ko ]; then seg="${seg} ${dim}($(dur $((reset - now)) ko) 뒤 리셋)${off}"
-          else seg="${seg} ${dim}(resets in $(dur $((reset - now))))${off}"; fi
-        fi
-      done
-    else
-      case "$text" in   # no numbers yet: a new account, or the usage endpoint asked to wait
-        "not logged in") seg="${seg}  ${dim}${w_out}${off}" ;;
-        "sign-in expired"*|"") [ "$fresh" = 1 ] && seg="${seg}  ${dim}${w_wait}${off}" ;;
-        *) seg="${seg}  ${dim}${w_wait}${off}" ;;
-      esac
-    fi
-    out="${out}${out:+  ${dim}┃${off}  }${seg}"
-  done
-  printf '%s' "${out}"   # no "new sessions →": a session follows the account in use, so there is only one
-}
+IFS= read -r -d '' STATUS_PY <<'PY' || true
+import os, re, time, unicodedata
+
+ROWS = [dict(zip(("n", "id", "dir", "label"), l.split("\t"))) for l in os.environ.get("CCP_ROWS", "").splitlines() if l]
+THIS, KO, COLOR = os.environ.get("CCP_THIS", ""), os.environ.get("CCP_KO") == "1", not os.environ.get("NO_COLOR")
+W = {"this": "이 세션", "wait": "확인 중", "out": "로그인 필요"} if KO else {"this": "this session", "wait": "checking", "out": "signed out"}
+NOW = time.time()
+SEEN = {}
+if os.environ.get("CCP_FRESH") == "1":
+    try:
+        for line in open(os.environ["CCP_SEEN"]):
+            f = line.rstrip("\n").split("\t")
+            if f[0]:
+                SEEN[f[0]] = (f[1] if len(f) > 1 else "", f[2] if len(f) > 2 else "")
+    except OSError:
+        pass
+
+
+def paint(code, text):
+    return f"\033[{code}m{text}\033[0m" if COLOR else text
+
+
+def width(text):   # what the terminal shows: escapes take no room, Korean takes two
+    text = re.sub(r"\033\[[0-9;]*m", "", text)
+    return sum(0 if unicodedata.combining(ch) else 2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
+
+
+def tone(used):   # soft green, orange, red
+    return "38;5;167" if used >= 90 else "38;5;179" if used >= 70 else "38;5;108"
+
+
+def bar(used, cells=10):   # eighths of a cell: 80 steps
+    used = max(0.0, min(100.0, used))
+    full, part = divmod(round(used / 100 * cells * 8), 8)
+    filled = "█" * full + ("▏▎▍▌▋▊▉"[part - 1] if part else "")
+    if not COLOR:
+        return filled + "░" * (cells - len(filled))
+    return f"\033[{tone(used)};48;5;237m{filled}{' ' * (cells - len(filled))}\033[0m"
+
+
+def left(ts):   # 5d2h, 4h49m, 9m
+    sec = max(0, int(ts - NOW))
+    d, rest = divmod(sec, 86400)
+    h, m = rest // 3600, rest % 3600 // 60
+    return f"{d}d{h}h" if d else f"{h}h{m}m" if h else f"{m}m"
+
+
+def parse(i):   # {"5h": (used, resets), "wk": …, "m.Fable": …} as ccp watch last saw it
+    out = {}
+    for tok in SEEN.get(i, ("", ""))[1].split():
+        key, used, ts = (tok.split(":") + ["0", "0"])[:3]
+        try:
+            out[key] = (float(used or 0), int(ts) if ts.isdigit() else 0)
+        except ValueError:
+            pass
+    return out
+
+
+def label(key):
+    return {"5h": "5h", "wk": "week"}.get(key, key[2:].replace("_", " ") if key.startswith("m.") else key)
+
+
+data = {r["id"]: parse(r["id"]) for r in ROWS}
+kinds = ["5h", "wk"] + sorted({k for d in data.values() for k in d if k.startswith("m.")})
+kinds = [k for k in kinds if any(k in d for d in data.values())]   # one row per limit, the same row in every column
+pad = max((len(label(k)) for k in kinds), default=4)
+
+
+def column(row):
+    n, i = row["n"], row["id"]
+    name = f"#{n}" if i == "default" or i.startswith("acct-") else f"#{n} {i}"
+    lines = [paint("1;7", f" ▶ {name} {W['this']} ") if i == THIS else paint("1", name)]
+    d, text = data[i], SEEN.get(i, ("", ""))[0]
+    if not d:
+        if text == "not logged in":
+            lines.append(paint("2", W["out"]))
+        elif SEEN or text:
+            lines.append(paint("2", W["wait"]))
+        return lines
+    for k in kinds:
+        if k not in d:
+            lines.append([paint("2", f"{label(k):<{pad}} {'·' * 10}    -"), ""])
+            continue
+        used, ts = d[k]
+        lines.append([f"{label(k):<{pad}} {bar(used)} {paint(tone(used), f'{used:>3.0f}%')}", paint("38;5;245", left(ts) if ts else "")])
+    return lines
+
+
+cols = [column(r) for r in ROWS]
+for c in cols:   # time left lines up on the right of each column
+    rows = [l for l in c if isinstance(l, list)]
+    wl = max((width(l[0]) for l in rows), default=0)
+    wr = max((width(l[1]) for l in rows), default=0)
+    for k, l in enumerate(c):
+        if isinstance(l, list):
+            c[k] = l[0] + " " * (wl - width(l[0]) + 2) + " " * (wr - width(l[1])) + l[1]
+widths = [max(width(l) for l in c) for c in cols]
+sep = paint("38;5;240", "│")
+out = []
+for k in range(max(len(c) for c in cols)):
+    cells = [(c[k] if k < len(c) else "") for c in cols]
+    out.append(f"  {sep}  ".join(cell + " " * (w - width(cell)) for cell, w in zip(cells, widths)).rstrip())
+print("\n".join(out), end="")
+PY
 
 cmd_prompt() {   # ccp prompt [--usage]: inside Claude Code the account it runs on ("#2 work"), in a shell the one `claude` would use
                  # here; --usage lists every account with its limits, for Claude Code's status line
