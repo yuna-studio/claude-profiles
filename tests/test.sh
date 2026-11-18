@@ -29,6 +29,9 @@ case "$1 ${2:-}" in
     else echo '{"loggedIn": false}'; exit 1; fi ;;
   "auth login") shift 2; echo "$*" > "$cfg/.stub-login" ;;
   "auth logout") rm -f "$cfg/.stub-login"; echo "logout ${CLAUDE_CONFIG_DIR:-default}" >> "$HOME/stub.log" ;;
+  "plugin list") cat "$HOME/plugins.txt" 2>/dev/null ;;
+  "plugin install") echo "$3" >> "$HOME/plugins.txt" ;;
+  "plugin marketplace") if [ "$3" = list ]; then cat "$HOME/markets.txt" 2>/dev/null; else echo "claude-profiles $4" >> "$HOME/markets.txt"; fi ;;
   *) echo "CONFIG=${CLAUDE_CONFIG_DIR:-unset} ARGS=$*" ;;
 esac
 EOF
@@ -247,6 +250,20 @@ ok "service status: running, with its settings" 'has "$(ccp service status)" "ru
 ccp service stop >/dev/null
 ok "service stop: unloads it and turns the switching off" '[ ! -e "$PL" ] && [ ! -e "$P/auto" ] && grep -q "bootout gui/" "$HOME/launchctl.log" && has "$(ccp service status)" "service: off"'
 ok "service: refuses odd numbers" '! ccp service start --at 0 2>/dev/null && ! ccp service start --every 5 2>/dev/null'
+
+# ccp setup: everything once per computer, nothing by hand
+out="$(SHELL=/bin/zsh CCP_PLUGIN_SOURCE=/src/claude-profiles ccp setup)"
+ok "setup: the shell runs ccp init" 'grep -q "^eval \"\$($ROOT/ccp init zsh)\"$" "$HOME/.zshrc" && has "$out" "✓ shell"'
+ok "setup: the status line shows every account, other settings stay" 'grep -q "\"command\": \"$ROOT/ccp prompt --usage\"" "$HOME/.claude/settings.json" && grep -q "\"model\": \"x\"" "$HOME/.claude/settings.json"'
+ok "setup: installs the Claude Code plugin" 'grep -q "^ccp@claude-profiles$" "$HOME/plugins.txt" && grep -q "/src/claude-profiles" "$HOME/markets.txt"'
+ok "setup: starts the service" '[ -f "$PL" ] && has "$out" "✓ service"'
+out="$(SHELL=/bin/zsh ccp setup)"
+ok "setup: twice changes nothing" '[ "$(grep -c "ccp init" "$HOME/.zshrc")" = 1 ] && [ "$(grep -c ccp@claude-profiles "$HOME/plugins.txt")" = 1 ] && has "$out" "already"'
+ccp setup --undo >/dev/null
+ok "setup --undo: takes out the shell lines, the status line and the service" '! grep -q ccp "$HOME/.zshrc" && ! grep -q statusLine "$HOME/.claude/settings.json" && [ ! -e "$PL" ]'
+echo '{"statusLine": {"type": "command", "command": "my-line"}}' > "$HOME/.claude/settings.json"
+ok "setup: a status line of yours stays" 'has "$(SHELL=/bin/zsh ccp setup --no-service)" "yours stays" && grep -q my-line "$HOME/.claude/settings.json"'
+echo '{"model":"x"}' > "$HOME/.claude/settings.json"; ccp setup --undo >/dev/null
 
 V="$(sed -n 's/^VERSION="\(.*\)"/\1/p' "$ROOT/ccp")"
 ok "plugin ships the same ccp, one version everywhere" 'cmp -s "$ROOT/ccp" "$ROOT/plugin/bin/ccp" && grep -q "\"version\": \"$V\"" "$ROOT/plugin/.claude-plugin/plugin.json" && grep -q "version \"$V\"" "$ROOT/Formula/ccp.rb" && grep -q "download/v$V/ccp" "$ROOT/Formula/ccp.rb"'

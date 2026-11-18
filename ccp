@@ -479,7 +479,7 @@ cmd_service() {   # ccp service start [--at PERCENT] [--every SECONDS] | stop | 
       done
       check_auto "$at" "$every"
       command -v python3 >/dev/null 2>&1 || die "service needs python3"
-      self="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"   # a Homebrew link stays a link: upgrades keep working
+      self="$(self_path)"
       mkdir -p "$CCP_HOME" "$(dirname "$plist")"
       printf 'at=%s\nevery=%s\n' "$at" "$every" > "$CCP_HOME/auto"
       cat > "$plist" <<EOF
@@ -883,6 +883,118 @@ EOF
   esac
 }
 
+self_path() {   # where this ccp lives; a Homebrew link stays a link, so upgrades keep working
+  echo "$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
+}
+
+setup_shell() {   # setup_shell <ccp>: the shell start-up file runs `ccp init`, so plain `claude` goes through ccp
+  local me="$1" sh rc
+  sh="$(basename "${SHELL:-}")"
+  case "$sh" in
+    zsh) rc="$HOME/.zshrc" ;;
+    bash) rc="$HOME/.bashrc"; [ "$(uname -s)" = Darwin ] && rc="$HOME/.bash_profile" ;;
+    *) say "· shell: $sh is not zsh or bash; add  eval \"\$(ccp init bash)\"  yourself"; return 0 ;;
+  esac
+  if grep -q '# >>> ccp >>>' "$rc" 2>/dev/null || grep -q 'ccp init' "$rc" 2>/dev/null; then say "✓ shell: $rc already runs ccp init"; return 0; fi
+  {
+    printf '\n# >>> ccp >>>  plain `claude` follows ccp (accounts, switching); `ccp setup --undo` removes this\n'
+    command -v ccp >/dev/null 2>&1 || printf 'export PATH="%s:$PATH"\n' "$(dirname "$me")"
+    printf 'eval "$(%s init %s)"\n' "$me" "$sh"
+    printf '# <<< ccp <<<\n'
+  } >> "$rc"
+  say "✓ shell: $rc runs ccp init (new terminals)"
+}
+
+setup_statusline() {   # setup_statusline <ccp>: every account's limits under Claude Code's prompt
+  local me="$1"
+  case "$me" in "$HOME"/.claude*/plugins/*) me=ccp ;; esac   # a plugin's copy moves with each update
+  python3 - "$BASE/settings.json" "$me prompt --usage" <<'PY'
+import json, os, sys
+path, cmd = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f:
+        s = json.load(f)
+except FileNotFoundError:
+    s = {}
+cur = (s.get("statusLine") or {}).get("command", "")
+if cur and "ccp prompt" not in cur:
+    print("· status line: yours stays (" + cur + "); add $(ccp prompt --usage) to it if you like")
+    sys.exit(0)
+if cur == cmd:
+    print("✓ status line: already shows every account's limits")
+    sys.exit(0)
+s["statusLine"] = {"type": "command", "command": cmd}
+tmp = path + ".ccp-tmp"
+with open(tmp, "w") as f:
+    json.dump(s, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+os.replace(tmp, path)
+print("✓ status line: every account's limits under the prompt")
+PY
+}
+
+setup_plugin() {   # the Claude Code plugin: /ccp:switch, /ccp:usage, the account row above the prompt
+  local c src="${CCP_PLUGIN_SOURCE:-yuna-studio/claude-profiles}"
+  c="$(real_claude 2>/dev/null)" || { say "· plugin: Claude Code not found"; return 0; }
+  if "$c" plugin list 2>/dev/null | grep -q 'ccp@claude-profiles'; then say "✓ plugin: ccp is installed"; return 0; fi
+  "$c" plugin marketplace list 2>/dev/null | grep -q 'claude-profiles' || "$c" plugin marketplace add "$src" >/dev/null 2>&1 \
+    || { say "· plugin: could not add the marketplace $src"; return 0; }
+  if "$c" plugin install ccp@claude-profiles >/dev/null 2>&1; then say "✓ plugin: ccp installed (new Claude Code sessions)"
+  else say "· plugin: install failed; try  claude plugin install ccp@claude-profiles"; fi
+}
+
+setup_undo() {   # ccp setup --undo: take out what setup put in (the plugin and your profiles stay)
+  local rc
+  for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do
+    [ -f "$rc" ] && grep -q '# >>> ccp >>>' "$rc" || continue
+    awk '/^# >>> ccp >>>/{skip=1} !skip{print} /^# <<< ccp <<</{skip=0}' "$rc" > "$rc.ccp-tmp" && mv "$rc.ccp-tmp" "$rc"
+    say "✓ shell: removed from $rc"
+  done
+  python3 - "$BASE/settings.json" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+try:
+    s = json.load(open(path))
+except Exception:
+    sys.exit(0)
+if "ccp prompt" in (s.get("statusLine") or {}).get("command", ""):
+    del s["statusLine"]
+    with open(path + ".ccp-tmp", "w") as f:
+        json.dump(s, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.replace(path + ".ccp-tmp", path)
+    print("✓ status line: removed")
+PY
+  [ -f "${CCP_AGENTS_DIR:-$HOME/Library/LaunchAgents}/$AGENT.plist" ] && cmd_service stop >/dev/null && say "✓ service: stopped"
+  return 0
+}
+
+cmd_setup() {   # ccp setup [--undo] [--no-shell] [--no-statusline] [--no-plugin] [--no-service]: everything, once per computer
+  local shell=1 line=1 plugin=1 service=1 me
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --undo) setup_undo; return ;;
+      --no-shell) shell=0 ;;
+      --no-statusline) line=0 ;;
+      --no-plugin) plugin=0 ;;
+      --no-service) service=0 ;;
+      *) die "usage: ccp setup [--undo] [--no-shell] [--no-statusline] [--no-plugin] [--no-service]" ;;
+    esac
+    shift
+  done
+  command -v python3 >/dev/null 2>&1 || die "setup needs python3"
+  me="$(self_path)"
+  [ "$shell" = 1 ] && setup_shell "$me"
+  [ "$line" = 1 ] && setup_statusline "$me"
+  [ "$plugin" = 1 ] && setup_plugin
+  if [ "$service" = 1 ]; then
+    if [ "$(uname -s)" = Darwin ] || [ -n "${CCP_LAUNCHCTL:-}" ]; then cmd_service start >/dev/null && say "✓ service: running (ccp service status)"
+    else say "· service: macOS only; keep 'ccp watch' running (systemd --user, tmux)"; fi
+  fi
+  say ""
+  say "next: ccp add (sign in another account once) · open a new terminal · ccp ls"
+}
+
 dur() {   # dur <seconds>: "4d 15h", "4h 49m", "12m" (or 4일 15시간 … in Korean)
   local s="$1" d h m
   [ "$s" -gt 0 ] 2>/dev/null || s=0
@@ -964,6 +1076,8 @@ usage() {
   cat <<EOF
 ccp $VERSION — several Claude Code accounts on one computer, no logging in again
 
+  ccp setup                     once per computer: shell, status line, Claude Code plugin, service   (--undo)
+
   ccp add [name] [-N]           new profile at the end, or at number N (the rest move down); signs in once
                                 [--isolated] [--no-login] [--email you@x.com] [--sso] [--console]
   ccp ls                        profiles by number, their accounts and plans, folder rules
@@ -1008,6 +1122,7 @@ main() {
     top) cmd_usage top "$@" ;;
     rm|remove) cmd_rm "$@" ;;
     init) cmd_init "$@" ;;
+    setup) cmd_setup "$@" ;;
     prompt) cmd_prompt "$@" ;;
     -v|--version|version) say "ccp $VERSION" ;;
     -h|--help|help) usage ;;

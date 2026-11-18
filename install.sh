@@ -14,6 +14,8 @@ chmod +x "$BIN/ccp.new" && mv "$BIN/ccp.new" "$BIN/ccp"
 echo "installed $BIN/ccp ($("$BIN/ccp" --version))"
 case ":$PATH:" in *":$BIN:"*) ;; *) echo "add $BIN to PATH:  echo 'export PATH=\"$BIN:\$PATH\"' >> ~/.zshrc" ;; esac
 echo
-echo "next:"
-echo "  ccp add work                                  # sign in once with another account"
-echo "  echo 'eval \"\$(ccp init zsh)\"' >> ~/.zshrc     # optional: plain \`claude\` follows your profiles"
+if [ -z "${CCP_NO_SETUP:-}" ]; then   # shell, status line, Claude Code plugin, service: nothing to set by hand
+  "$BIN/ccp" setup || echo "setup did not finish; run: ccp setup"
+else
+  echo "next: ccp setup   (shell, status line, Claude Code plugin, service)"
+fi
