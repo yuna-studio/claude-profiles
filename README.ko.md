@@ -91,12 +91,13 @@ Claude Code 안에서는 Claude 에게 「2번 계정으로 바꿔」라고 하�
 빌려 준 계정의 폴더에는 그동안 갱신되는 사본을 남기지 않아요(두 곳이 같은 로그인을 갱신하면 한쪽이 로그아웃돼요).
 다른 계정으로 바꿀 때 가장 새 사본을 돌려받아요.
 
-- **백그라운드 세션**(`claude --bg`, 에이전트 화면)은 Claude Code 데몬에게 토큰을 받고, 데몬은 시작할 때 로그인을 읽어요.
-  `ccp use` 는 `claude daemon stop --keep-workers` 로 세션은 그대로 둔 채 데몬만 다시 띄우고, 새 데몬이 세션을 다시 붙이면서
-  새 로그인을 나눠 줘요. 멈추는 세션은 없어요.
+- **백그라운드 세션**(`claude --bg`, 에이전트 화면): 이미 돌던 세션은 들고 있는 토큰이 만료될 때까지(길어야 몇 시간) 그 토큰을
+  쓰고, 그다음 `~/.claude` 를 다시 읽어 새 로그인으로 이어가요. 바로 바꾸려면 `claude respawn <id>` 로 그 자리에서 다시 띄워요
+  (같은 ID · 같은 대화 · 같은 목록). `ccp use` 는 데몬도 `claude daemon stop --keep-workers` 로 다시 띄워서(세션은 계속 돎)
+  새로 뜨는 백그라운드 세션은 처음부터 새 로그인을 써요.
 - **터미널 세션**: `ccp service` 가 켜져 있을 때 `ccp run`(또는 `ccp init` 뒤의 `claude`)으로 띄운 세션은 쉬고 있을 때 같은
-  터미널에서 같은 대화를 다시 열어요(`claude --resume`, `--model` 같은 옵션 그대로). ccp 를 거치지 않은 터미널은 다음 로그인
-  확인 때 바뀌어요(바로 바꾸려면 `/exit` 뒤 `claude --continue`).
+  터미널에서 같은 대화를 다시 열어요(`claude --resume`, `--model` 같은 옵션 그대로). ccp 를 거치지 않은 터미널은 토큰이 만료될
+  때 바뀌어요(바로 바꾸려면 `/exit` 뒤 `claude --continue`).
 - 폴더 규칙(`ccp here`) · `-p` · `CCP_PROFILE` 로 연 세션은 그 계정 폴더와 로그인을 그대로 써요.
 
 입력창 아래에 계정마다 한도를 띄우려면 `~/.claude/settings.json` 상태 줄에 `ccp prompt --usage` 를 넣어요.

@@ -293,8 +293,9 @@ EOF
   return 0
 }
 
-readopt() {   # background sessions take the new login at once: Claude Code's daemon reads it when it starts and hands it to
-              # each session it adopts, and `daemon stop --keep-workers` leaves them running (a terminal session: supervise)
+readopt() {   # Claude Code's daemon reads the login when it starts and gives it to the sessions it starts; `daemon stop
+              # --keep-workers` restarts it and leaves the running sessions alone. A running session keeps the token it holds
+              # until that runs out (hours at most), then reads ~/.claude again; `claude respawn <id>` restarts one in place now
   local c n; c="$(real_claude 2>/dev/null)" || return 0
   (
     unset CLAUDE_CONFIG_DIR
@@ -305,7 +306,7 @@ readopt() {   # background sessions take the new login at once: Claude Code's da
       n=$((n + 1)); [ "$n" -lt "${CCP_DAEMON_WAIT:-45}" ] || { say "background sessions take it once Claude Code's daemon is back (claude agents starts it)"; exit 0; }
       sleep 1; [ $((n % 10)) = 0 ] && "$c" agents --json >/dev/null 2>&1
     done
-    say "background sessions took it too (they kept running)"
+    say "new background sessions start with it; running ones switch once the token they hold runs out (claude respawn <id> switches one now, in place)"
   )
   return 0
 }
@@ -554,8 +555,10 @@ sw_here() {   # inside Claude Code: that account's login from now on, for this s
   if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
     say "this session runs on a profile folder of its own (a folder rule, -p or CCP_PROFILE), so it keeps that account"
   elif [ -n "${CCP_RUN:-}" ]; then say "this conversation goes on in this terminal with that login once the turn ends"
-  elif [ -z "${CLAUDE_JOB_DIR:-}" ]; then
-    say "a terminal session started without ccp takes it at its next sign-in check (/exit, then claude --continue, takes it now)"
+  elif [ -n "${CLAUDE_JOB_DIR:-}" ]; then
+    say "this background session keeps the token it holds until it runs out; to switch now, from another terminal: claude respawn $(basename "$CLAUDE_JOB_DIR")"
+  else
+    say "a terminal session started without ccp keeps the token it holds until it runs out (/exit, then claude --continue, takes it now)"
   fi
   return 0
 }

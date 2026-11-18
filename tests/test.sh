@@ -250,7 +250,7 @@ STUB_RUN='/bin/bash "$CCP_SRC" sw 3' CCP_SRC="$ROOT/ccp" CCP_TEST_TTY=1 CCP_POLL
 out="$(cat "$T/sup.out")"
 ok "sw inside: puts #3's login in ~/.claude and says the conversation goes on here" 'has "$(cat "$HOME/stub-run.out")" "Claude Code uses #3" && has "$(cat "$HOME/stub-run.out")" "goes on in this terminal" && [ "$(cat "$P/slot")" = acct-4 ]'
 ok "sw inside: the same terminal reopens the conversation in place" 'has "$out" "TERM CONFIG=unset" && has "$out" "CONFIG=unset ARGS=--model m --resume sid-1"'
-ok "sw inside: a session started without ccp is told when it takes the login" 'CLAUDECODE=1 ccp sw 1 > "$T/o" && has "$(cat "$T/o")" "at its next sign-in check" && [ ! -e "$P/slot" ]'
+ok "sw inside: a session started without ccp is told when it takes the login" 'CLAUDECODE=1 ccp sw 1 > "$T/o" && has "$(cat "$T/o")" "keeps the token it holds until it runs out" && [ ! -e "$P/slot" ]'
 ok "sw inside: a session on a profile folder of its own keeps that account" 'has "$(CLAUDECODE=1 CLAUDE_CONFIG_DIR="$P/acct-5" ccp sw 3)" "keeps that account" && ccp use 1 >/dev/null'
 
 # background sessions are never stopped or moved: the daemon restarts, leaves them running and hands them the new login
@@ -258,7 +258,7 @@ rm -f "$HOME/stub.log" "$HOME/stub-run.out"; touch "$HOME/daemon-up"
 STUB_KIND=bg STUB_SID=abcd1234-0000 STUB_TICKS=20 STUB_RUN='export CLAUDE_JOB_DIR=/x/jobs/abcd1234; /bin/bash "$CCP_SRC" sw 3' CCP_SRC="$ROOT/ccp" \
   "$CCP_CLAUDE" --stay > "$T/bg.out" 2>&1
 ok "sw inside a background session: the login changes, the session runs on where it is" 'has "$(cat "$HOME/stub-run.out")" "Claude Code uses #3" && has "$(cat "$T/bg.out")" "ENDED" && ! grep -q "^stop \|^bg-resume\|^rm " "$HOME/stub.log"'
-ok "readopt: the daemon restarts with its sessions left running, and adopts them again" 'grep -q "^daemon stop --any --keep-workers CONFIG=unset$" "$HOME/stub.log" && grep -q "^agents CONFIG=unset$" "$HOME/stub.log" && has "$(cat "$HOME/stub-run.out")" "background sessions took it too"'
+ok "readopt: the daemon restarts with its sessions left running, and adopts them again" 'grep -q "^daemon stop --any --keep-workers CONFIG=unset$" "$HOME/stub.log" && grep -q "^agents CONFIG=unset$" "$HOME/stub.log" && has "$(cat "$HOME/stub-run.out")" "new background sessions start with it" && has "$(cat "$HOME/stub-run.out")" "claude respawn abcd1234"'
 rm -f "$HOME/daemon-up" "$HOME/stub.log"; ccp use 1 >/dev/null
 ok "readopt: no daemon running, nothing to restart" '! grep -q "daemon stop" "$HOME/stub.log" 2>/dev/null'
 rm -f "$P/full"

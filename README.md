@@ -119,12 +119,13 @@ stays in its list, its folder and its terminal; only the account its tokens come
 `~/.claude` stay as they are. Meanwhile the lent account keeps no renewable copy in its own folder (two copies renewing
 one login would sign one of them out); it gets the freshest copy back when you switch away from it.
 
-- **Background sessions** (`claude --bg`, the agent view) get their token from Claude Code's daemon, which reads the login
-  when it starts. `ccp use` restarts the daemon with `claude daemon stop --keep-workers`, which leaves the sessions
-  running, and the new daemon hands the new login to each one it adopts. No session stops.
+- **Background sessions** (`claude --bg`, the agent view): a running one keeps the token it holds until that runs out
+  (a few hours at most), then reads `~/.claude` again and goes on with the new login. `claude respawn <id>` restarts one
+  in place now (same id, same conversation, same list). `ccp use` also restarts Claude Code's daemon with
+  `claude daemon stop --keep-workers` (sessions keep running), so new background sessions start with the new login.
 - **A terminal session** started with `ccp run` (or `claude` after `ccp init`) while `ccp service` is on reopens the same
   conversation in the same terminal once it is idle (`claude --resume`, options such as `--model` kept). A terminal
-  that started `claude` without `ccp` takes the login at its next sign-in check (`/exit`, `claude --continue` takes it now).
+  that started `claude` without `ccp` keeps its token until it runs out (`/exit`, `claude --continue` takes it now).
 - A session on a folder rule (`ccp here`), `-p` or `CCP_PROFILE` keeps its own account's folder and login.
 
 To see every account's limits under the prompt, put `ccp prompt --usage` in Claude Code's status line (`~/.claude/settings.json`):
