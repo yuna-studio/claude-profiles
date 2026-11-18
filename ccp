@@ -10,10 +10,11 @@
 #
 # Works with bash 3.2 (stock macOS). https://github.com/yuna-studio/claude-profiles  ·  MIT
 set -u
-VERSION="0.4.0"
+VERSION="0.5.0"
 CCP_HOME="${CCP_HOME:-$HOME/.claude-profiles}"
 BASE="${CCP_BASE:-$HOME/.claude}"   # the default profile's folder: what other profiles share from
 TAB="$(printf '\t')"
+AGENT="ai.yunastudio.ccp"   # the launchd job `ccp service` runs (macOS)
 SHARE="settings.json CLAUDE.md agents commands skills output-styles plugins keybindings.json projects"
 
 say() { printf '%s\n' "$*"; }
@@ -251,6 +252,7 @@ cmd_use() {
   [ -n "${1:-}" ] || die "usage: ccp use <number|name>   (ccp use 1, or ccp use default, goes back to ~/.claude)"
   local id; id="$(need "$1")" || exit 1; mkdir -p "$CCP_HOME"
   if [ "$id" = default ]; then rm -f "$CCP_HOME/default"; else echo "$id" > "$CCP_HOME/default"; fi
+  rm -f "$CCP_HOME/moved" "$CCP_HOME/stuck"   # your choice now; ccp watch no longer moves it back
   say "default profile: $(label "$id")"
 }
 
@@ -280,11 +282,14 @@ cmd_env() {   # eval "$(ccp env [number|name])": pin this shell to a profile
 }
 
 cmd_run() {   # ccp run [-p number|name] [--] [claude args...]
-  local want=""
+  local want="" why="" r
   case "${1:-}" in -p|--profile) want="${2:-}"; [ -n "$want" ] || die "run: -p needs a number or name"; shift 2 ;; esac
   [ "${1:-}" = -- ] && shift
-  [ -n "$want" ] || want="$(resolve . | cut -f1)"
+  if [ -z "$want" ]; then r="$(resolve .)" || exit 1; want="${r%%$TAB*}"; why="${r#*$TAB}"; fi
   local id c; id="$(need "$want")" || exit 1; c="$(real_claude)" || exit 1
+  case "$why" in   # a session that follows the default moves with it while ccp watch runs; rules, -p and CCP_PROFILE stay put
+    "ccp use"|built-in) if watching && interactive "$@"; then supervise "$id" "$c" "$@"; exit $?; fi ;;
+  esac
   export CCP_ACTIVE="$id"   # what is running, for `ccp prompt` in Claude Code's status line
   if [ "$id" = default ]; then unset CLAUDE_CONFIG_DIR; exec "$c" "$@"; fi
   CLAUDE_CONFIG_DIR="$(pdir "$id")" exec "$c" "$@"
@@ -296,6 +301,208 @@ cmd_sw() {   # ccp sw <number|name> [claude args]: the same conversation, now on
   [ "${1:-}" = -- ] && shift
   [ $# -gt 0 ] || set -- --continue
   cmd_run -p "$want" -- "$@"
+}
+
+# Switching when an account is full. `ccp watch` (run by `ccp service start`) checks every account's usage, writes the
+# ones at the limit to $CCP_HOME/full, and moves the default (what new sessions use) to the next account with room.
+# A session `ccp run` starts on the default is watched while it runs: once the watcher lists its account and the session
+# is idle (Claude Code stops a turn when the limit hits), it ends and continues the same conversation on the new default.
+
+watching() { [ -n "$(find "$CCP_HOME/full" -mmin -15 2>/dev/null)" ]; }   # ccp watch wrote it lately (every <= 300 s)
+
+is_full() { watching && grep -q "^$1$TAB" "$CCP_HOME/full" 2>/dev/null; }
+
+interactive() {   # a Claude Code run in a terminal that can be continued elsewhere (not -p, a subcommand or --help)
+  { [ -t 0 ] && [ -t 1 ]; } || [ -n "${CCP_TEST_TTY:-}" ] || return 1
+  local a
+  for a in "$@"; do case "$a" in -p|--print|-h|--help|-v|--version) return 1 ;; esac; done
+  case "${1:-}" in
+    auth|mcp|plugin|plugins|doctor|update|upgrade|install|setup-token|config|migrate-installer|daemon|agents) return 1 ;;
+  esac
+  return 0   # no arguments, options, or a first prompt (claude "fix the build")
+}
+
+keep_flags() {   # the launch options a continued session keeps, one per line (not the prompt, --continue or --resume)
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --model|--permission-mode|--add-dir|--agent|--settings|--mcp-config|--effort|--fallback-model|--append-system-prompt)
+        [ $# -ge 2 ] && printf '%s\n%s\n' "$1" "$2"; shift ;;
+      --model=*|--permission-mode=*|--add-dir=*|--agent=*|--settings=*|--mcp-config=*|--effort=*|--fallback-model=*) printf '%s\n' "$1" ;;
+      --dangerously-skip-permissions|--allow-dangerously-skip-permissions|--chrome|--no-chrome|--ide|--verbose|--strict-mcp-config|--debug)
+        printf '%s\n' "$1" ;;
+    esac
+    shift
+  done
+}
+
+session_info() {   # session_info <file> -> "sessionId<TAB>status" from Claude Code's record of a running session
+  python3 -c 'import json, sys
+try: d = json.load(open(sys.argv[1]))
+except Exception: sys.exit(1)
+print("%s\t%s" % (d.get("sessionId") or "", d.get("status") or ""))' "$1" 2>/dev/null
+}
+
+session_watch() {   # session_watch <id> <run dir>: beside a supervised session, end it once its account is full and it is idle
+  local id="$1" run="$2" pid="" cfg info sid st to n
+  cfg="$BASE"; [ "$id" = default ] || cfg="$(pdir "$id")"
+  while sleep "${CCP_POLL:-3}"; do
+    [ -n "$pid" ] || pid="$(cat "$run/pid" 2>/dev/null)"
+    [ -n "$pid" ] || continue
+    kill -0 "$pid" 2>/dev/null || return 0
+    is_full "$id" || continue
+    to="$(cat "$CCP_HOME/default" 2>/dev/null)"; exists "$to" || to=default
+    [ "$to" != "$id" ] || continue   # every account is full: stay
+    is_full "$to" && continue
+    info="$(session_info "$cfg/sessions/$pid.json")" || continue
+    sid="${info%%$TAB*}"; st="${info#*$TAB}"
+    [ -n "$sid" ] || continue
+    case "$st" in ""|idle) ;; *) continue ;; esac   # never cut a turn, a tool or a question short
+    printf '%s\t%s\n' "$to" "$sid" > "$run/switch"
+    kill -TERM "$pid" 2>/dev/null
+    n=0; while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 10 ]; do sleep 1; n=$((n + 1)); done
+    kill -KILL "$pid" 2>/dev/null
+    return 0
+  done
+}
+
+supervise() {   # supervise <id> <claude> <args...>: ccp run while ccp watch runs; continues the conversation when the account is full
+  local id="$1" c="$2" run rc=0 mon to sid l; shift 2
+  local -a keep=()
+  while IFS= read -r l; do [ -n "$l" ] && keep+=("$l"); done <<EOF
+$(keep_flags "$@")
+EOF
+  run="$(mktemp -d "${TMPDIR:-/tmp}/ccp-run.XXXXXX")" || die "run: no temp folder"
+  while :; do
+    rm -f "$run/pid" "$run/switch"
+    session_watch "$id" "$run" &
+    mon=$!
+    # sh writes its pid, then becomes Claude Code: the watcher finds the session record by that pid
+    if [ "$id" = default ]; then CCP_ACTIVE="$id" env -u CLAUDE_CONFIG_DIR /bin/sh -c 'echo $$ > "$0"; exec "$@"' "$run/pid" "$c" "$@"
+    else CCP_ACTIVE="$id" CLAUDE_CONFIG_DIR="$(pdir "$id")" /bin/sh -c 'echo $$ > "$0"; exec "$@"' "$run/pid" "$c" "$@"; fi
+    rc=$?
+    kill "$mon" 2>/dev/null; wait "$mon" 2>/dev/null
+    [ -s "$run/switch" ] || break
+    IFS="$TAB" read -r to sid < "$run/switch"
+    [ -t 0 ] && stty sane 2>/dev/null
+    printf '\nccp: %s is full; continuing this conversation on %s\n\n' "$(label "$id")" "$(label "$to")" >&2
+    id="$to"
+    set -- ${keep[@]+"${keep[@]}"} --resume "$sid"
+  done
+  rm -rf "$run"
+  return "$rc"
+}
+
+auto_get() { sed -n "s/^$1=//p" "$CCP_HOME/auto" 2>/dev/null | head -1; }   # a ccp service setting
+
+check_auto() {   # check_auto <at> <every>: the numbers ccp watch takes
+  case "$1" in ""|*[!0-9]*) die "--at takes a percent from 1 to 100" ;; esac
+  [ "$1" -ge 1 ] && [ "$1" -le 100 ] || die "--at takes a percent from 1 to 100"
+  case "$2" in ""|*[!0-9]*) die "--every takes seconds (30 to 300)" ;; esac
+  [ "$2" -ge 30 ] && [ "$2" -le 300 ] || die "--every takes seconds (30 to 300)"
+}
+
+cmd_watch() {   # ccp watch [--at PERCENT] [--every SECONDS] [--once]: what `ccp service` keeps running
+  local at every once=0
+  at="$(auto_get at)"; every="$(auto_get every)"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --at) shift; at="${1:-}" ;;
+      --every) shift; every="${1:-}" ;;
+      --once) once=1 ;;
+      *) die "usage: ccp watch [--at PERCENT] [--every SECONDS] [--once]" ;;
+    esac
+    shift
+  done
+  at="${at:-100}"; every="${every:-60}"
+  check_auto "$at" "$every"
+  command -v python3 >/dev/null 2>&1 || die "watch needs python3"
+  mkdir -p "$CCP_HOME"
+  [ "$once" = 1 ] || say "$(date '+%F %T') ccp $VERSION watching every ${every}s: at ${at}%, new sessions move to the next account with room"
+  while :; do
+    CCP_ROWS="$(usage_rows)" CCP_BASE_DIR="$BASE" CCP_VERSION="$VERSION" CCP_HOME_DIR="$CCP_HOME" CCP_AT="$at" \
+      python3 -c "$USAGE_PY" watch "$every"
+    [ "$once" = 1 ] && return 0
+    sleep "$every"
+  done
+}
+
+xml() { printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
+
+cmd_service() {   # ccp service start [--at PERCENT] [--every SECONDS] | stop | status
+  local sub="${1:-status}"; [ $# -gt 0 ] && shift
+  local plist lc dom self at every pid
+  plist="${CCP_AGENTS_DIR:-$HOME/Library/LaunchAgents}/$AGENT.plist"; lc="${CCP_LAUNCHCTL:-launchctl}"; dom="gui/$(id -u)"
+  case "$sub" in
+    start)
+      [ "$(uname -s)" = Darwin ] || [ -n "${CCP_LAUNCHCTL:-}" ] \
+        || die "service: macOS only for now; elsewhere keep 'ccp watch' running (systemd --user, tmux)"
+      at="$(auto_get at)"; every="$(auto_get every)"; at="${at:-100}"; every="${every:-60}"
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --at) shift; at="${1:-}" ;;
+          --every) shift; every="${1:-}" ;;
+          *) die "usage: ccp service start [--at PERCENT] [--every SECONDS]" ;;
+        esac
+        shift
+      done
+      check_auto "$at" "$every"
+      command -v python3 >/dev/null 2>&1 || die "service needs python3"
+      self="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"   # a Homebrew link stays a link: upgrades keep working
+      mkdir -p "$CCP_HOME" "$(dirname "$plist")"
+      printf 'at=%s\nevery=%s\n' "$at" "$every" > "$CCP_HOME/auto"
+      cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$AGENT</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/bash</string><string>$(xml "$self")</string><string>watch</string></array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>$(xml "$PATH")</string>
+    <key>CCP_HOME</key><string>$(xml "$CCP_HOME")</string>
+    <key>CCP_BASE</key><string>$(xml "$BASE")</string>
+  </dict>
+  <key>WorkingDirectory</key><string>$(xml "$HOME")</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>$(xml "$CCP_HOME/watch.log")</string>
+  <key>StandardErrorPath</key><string>$(xml "$CCP_HOME/watch.log")</string>
+</dict>
+</plist>
+EOF
+      "$lc" bootout "$dom/$AGENT" >/dev/null 2>&1 || true
+      "$lc" bootstrap "$dom" "$plist" || die "service: launchctl could not load $plist"
+      say "ccp watch is running in the background, and starts again at login"
+      say "when the account new sessions use reaches ${at}%, they move to the next account with room (checked every ${every}s)"
+      say "a session you start with ccp run (or claude, after ccp init) continues there once it stops at the limit"
+      say "log: $CCP_HOME/watch.log  ·  ccp service status  ·  ccp service stop"
+      ;;
+    stop)
+      "$lc" bootout "$dom/$AGENT" >/dev/null 2>&1 || true
+      rm -f "$plist" "$CCP_HOME/auto" "$CCP_HOME/full" "$CCP_HOME/moved" "$CCP_HOME/stuck"
+      say "stopped; new sessions keep using $(label "$(ref "$(cat "$CCP_HOME/default" 2>/dev/null || echo default)" || echo default)")"
+      ;;
+    status)
+      if pid="$("$lc" print "$dom/$AGENT" 2>/dev/null | sed -n 's/^[[:space:]]*pid = \([0-9]*\).*/\1/p' | head -1)" && [ -n "$pid" ]; then
+        say "service: running (pid $pid), at $(auto_get at)% · every $(auto_get every)s"
+      elif [ -f "$plist" ]; then say "service: loaded, not running (see $CCP_HOME/watch.log)"
+      else say "service: off (ccp service start)"; fi
+      say "new sessions use: $(label "$(ref "$(cat "$CCP_HOME/default" 2>/dev/null || echo default)" || echo default)")"
+      [ -s "$CCP_HOME/moved" ] && exists "$(cat "$CCP_HOME/moved")" && say "moved from $(label "$(cat "$CCP_HOME/moved")"); goes back when it has room"
+      if watching; then
+        local fid fname fused freset
+        while IFS="$TAB" read -r fid fname fused freset; do
+          [ -n "$fid" ] && exists "$fid" && say "full: $(label "$fid") at ${fused}% of its $fname limit$( [ "${freset:-0}" -gt 0 ] 2>/dev/null && printf ' until %s' "$(date -r "$freset" '+%m-%d %H:%M' 2>/dev/null || date -d "@$freset" '+%m-%d %H:%M' 2>/dev/null)")"
+        done < "$CCP_HOME/full"
+      fi
+      if [ -s "$CCP_HOME/watch.log" ]; then say ""; say "last log lines:"; tail -n 3 "$CCP_HOME/watch.log" | sed 's/^/  /'; fi
+      ;;
+    *) die "usage: ccp service start [--at PERCENT] [--every SECONDS] | stop | status" ;;
+  esac
 }
 
 cmd_rm() {
@@ -517,7 +724,106 @@ def top():
         sys.stdout.write("\033[?25h")
 
 
-if MODE == "json":
+def watch():
+    """One check for `ccp watch`: list full accounts, move the default off a full one, and back when it has room."""
+    home, at = os.environ["CCP_HOME_DIR"], float(os.environ.get("CCP_AT") or 100)
+    results = [fetch(r) for r in ROWS]
+    by = {r["id"]: r for r in results}
+
+    def path(name):
+        return os.path.join(home, name)
+
+    def read(name):
+        try:
+            with open(path(name)) as f:
+                return f.read().strip()
+        except Exception:
+            return ""
+
+    def write(name, text):
+        tmp = path(name) + f".{os.getpid()}"
+        with open(tmp, "w") as f:
+            f.write(text)
+        os.replace(tmp, path(name))
+
+    def remove(name):
+        try:
+            os.remove(path(name))
+        except FileNotFoundError:
+            pass
+
+    def blocking(r):   # the 5-hour or week limit that stops this account, the one that frees up last
+        hit = [l for l in r["limits"] if l["name"] in ("5-hour", "week") and l["used"] >= at] if not r["error"] else []
+        return max(hit, key=lambda l: l["resets"] or 0) if hit else None
+
+    full = {r["id"]: blocking(r) for r in results if blocking(r)}
+    write("full", "".join(f"{i}\t{l['name']}\t{l['used']:.0f}\t{int(l['resets'] or 0)}\n" for i, l in full.items()))
+
+    def name(i):
+        r = by[i]
+        return f"#{r['n']} {r['email']}" if r["email"] != "-" else r["label"]
+
+    def frees(l):
+        return f", free in {ago(l['resets'] - time.time())}" if l["resets"] else ""
+
+    def room(r, unknown_ok):   # a new session can start there
+        if r["id"] in full:
+            return False
+        if not r["error"]:
+            return True
+        return unknown_ok and r["error"].startswith("sign-in expired")   # Claude Code renews it when it starts
+
+    def tell(msg):
+        print(time.strftime("%Y-%m-%d %H:%M:%S ") + msg, flush=True)
+        if os.environ.get("CCP_NO_NOTIFY"):
+            return
+        try:
+            if sys.platform == "darwin":
+                subprocess.run(["osascript", "-e", "on run argv", "-e", 'display notification (item 1 of argv) with title "ccp"',
+                                "-e", "end run", msg], capture_output=True, timeout=10)
+            elif shutil.which("notify-send"):
+                subprocess.run(["notify-send", "ccp", msg], capture_output=True, timeout=10)
+        except Exception:
+            pass
+
+    def use(i):
+        if i == "default":
+            remove("default")
+        else:
+            write("default", i + "\n")
+
+    cur = read("default") or "default"
+    cur = cur if cur in by else "default"
+    moved = read("moved")
+    if cur in full:
+        l = full[cur]
+        to = next((r["id"] for r in results if r["id"] != cur and room(r, True)), None)
+        if to:
+            use(to)
+            if to == moved:   # back on the account it first moved from
+                remove("moved")
+            elif moved not in by:   # remember the first one, to go back to it
+                write("moved", cur + "\n")
+            remove("stuck")
+            tell(f"{name(cur)} is at {l['used']:.0f}% of its {l['name']} limit{frees(l)}. New Claude Code sessions use {name(to)}.")
+        elif not os.path.exists(path("stuck")):
+            write("stuck", cur + "\n")
+            tell(f"Every account is full. {name(cur)} is at {l['used']:.0f}% of its {l['name']} limit{frees(l)}.")
+        return
+    remove("stuck")
+    if moved and moved not in by:
+        remove("moved")
+    elif moved and moved != cur and room(by[moved], False):
+        use(moved)
+        remove("moved")
+        tell(f"{name(moved)} has room again. New Claude Code sessions use it again.")
+    elif moved == cur:
+        remove("moved")
+
+
+if MODE == "watch":
+    watch()
+elif MODE == "json":
     json.dump([fetch(r) for r in ROWS], sys.stdout, indent=2)
     print()
 elif MODE == "top" and sys.stdin.isatty() and sys.stdout.isatty():
@@ -558,6 +864,9 @@ ccp $VERSION — several Claude Code accounts on one computer, no logging in aga
   ccp which [dir]               which profile a claude run here would use, and why
   ccp run [-p n|name] [-- args] run Claude Code with the profile for here (or -p)
   ccp sw <n|name>               switch: continue the last conversation in this folder on account n (after /exit)
+  ccp service start [--at 100]  in the background: when the account in use is full, new sessions use the next one
+                                with room, and sessions started with ccp run continue there   (stop · status)
+  ccp watch [--at 100]          the same in this terminal
   ccp env [n|name]              eval "\$(ccp env 2)": pin this shell to a profile
   ccp login <n|name>            sign a profile in again
   ccp rm <n|name> [--yes]       sign out and delete a profile
@@ -581,6 +890,8 @@ main() {
     env) cmd_env "$@" ;;
     run) cmd_run "$@" ;;
     sw|switch) cmd_sw "$@" ;;
+    watch) cmd_watch "$@" ;;
+    service) cmd_service "$@" ;;
     usage) cmd_usage once "$@" ;;
     top) cmd_usage top "$@" ;;
     rm|remove) cmd_rm "$@" ;;

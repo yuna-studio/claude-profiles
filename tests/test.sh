@@ -14,6 +14,13 @@ cat > "$T/bin/claude" <<'EOF'
 #!/bin/bash
 cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 [ "${1:-}" = active ] && { echo "ACTIVE=${CCP_ACTIVE:-}"; exit 0; }
+if [ "${1:-}" = --stay ]; then   # a session that stays open, with the record Claude Code keeps for it, until it is ended
+  mkdir -p "$cfg/sessions"
+  printf '{"pid": %s, "sessionId": "sid-1", "status": "%s"}\n' "$$" "${STUB_STATUS:-idle}" > "$cfg/sessions/$$.json"
+  trap 'echo "TERM CONFIG=${CLAUDE_CONFIG_DIR:-unset}"; rm -f "$cfg/sessions/$$.json"; exit 143' TERM
+  i=0; while [ "$i" -lt "${STUB_TICKS:-100}" ]; do sleep 0.1; i=$((i + 1)); done
+  rm -f "$cfg/sessions/$$.json"; echo "ENDED CONFIG=${CLAUDE_CONFIG_DIR:-unset}"; exit 0
+fi
 case "$1 ${2:-}" in
   "auth status")
     if [ -f "$cfg/.stub-login" ]; then printf '{"loggedIn": true, "email": "%s@x.com", "subscriptionType": "max", "authMethod": "claude.ai"}\n' "$(basename "${CLAUDE_CONFIG_DIR:-default}")"
@@ -161,12 +168,59 @@ ok "usage: marks the account used here" 'has "$out" "* 1 "'
 js="$(ccp usage --json)"
 ok "usage --json: for scripts, still no token" 'has "$js" "\"used\": 48.0" && ! has "$js" "tok-" 2>/dev/null'
 ok "top: without a terminal prints once" 'has "$(ccp top </dev/null)" "me@x.com"'
+
+export CCP_NO_NOTIFY=1
+out="$(ccp watch --once --at 90)"
+ok "watch: a full account hands new sessions to the next one with room" 'has "$out" "#1 me@x.com is at 91% of its 5-hour limit" && has "$out" "New Claude Code sessions use #3 four@x.com" && [ "$(cat "$P/default")" = acct-4 ] && [ "$(cat "$P/moved")" = default ]'
+ok "watch: lists full accounts for running sessions" 'grep -q "^default	5-hour	91	" "$P/full"'
+out="$(ccp watch --once --at 95)"
+ok "watch: goes back once the first account has room" 'has "$out" "#1 me@x.com has room again" && [ ! -e "$P/default" ] && [ ! -e "$P/moved" ] && [ ! -s "$P/full" ]'
+ok "watch: quiet when nothing changes" '[ -z "$(ccp watch --once --at 95)" ]'
+ccp watch --once --at 10 >/dev/null
+ok "watch: an expired sign-in still has room (Claude Code renews it on start)" '[ "$(cat "$P/default")" = acct-5 ] && [ "$(cat "$P/moved")" = default ]'
+ccp use 1 >/dev/null
+ok "use: your choice clears what watch moved" '[ ! -e "$P/default" ] && [ ! -e "$P/moved" ]'
+ok "watch: refuses odd numbers" '! ccp watch --once --at 0 2>/dev/null && ! ccp watch --once --at 101 2>/dev/null && ! ccp watch --once --every 5 2>/dev/null'
 { kill "$SRV"; wait "$SRV"; } 2>/dev/null
+
+# a running session moves when ccp watch finds its account full
+: > "$P/full"   # a watcher is running, nothing is full yet
+started() { i=0; while ! ls "$1"/*.json >/dev/null 2>&1 && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done; }
+CCP_TEST_TTY=1 CCP_POLL=0.2 ccp run -- --stay --model m "first prompt" > "$T/sup.out" 2>&1 &
+SUP=$!; started "$HOME/.claude/sessions"
+echo acct-4 > "$P/default"; printf 'default\tweek\t100\t0\n' > "$P/full"   # what ccp watch does when #1 is full
+wait "$SUP"; out="$(cat "$T/sup.out")"
+ok "auto switch: ends the idle session on the full account" 'has "$out" "TERM CONFIG=unset"'
+ok "auto switch: continues the same conversation on the new default, keeps options, not the prompt" 'has "$out" "#1 default is full; continuing this conversation on #3" && has "$out" "CONFIG=$P/acct-4 ARGS=--model m --resume sid-1"'
+rm -f "$P/default"; : > "$P/full"
+STUB_STATUS=busy STUB_TICKS=20 CCP_TEST_TTY=1 CCP_POLL=0.2 ccp run -- --stay > "$T/sup.out" 2>&1 &
+SUP=$!; started "$HOME/.claude/sessions"
+echo acct-4 > "$P/default"; printf 'default\tweek\t100\t0\n' > "$P/full"
+wait "$SUP"; out="$(cat "$T/sup.out")"
+ok "auto switch: never cuts a busy session short" 'has "$out" "ENDED CONFIG=unset" && ! has "$out" "continuing" 2>/dev/null'
+ok "auto switch: -p and print mode are left alone" '[ "$(CCP_TEST_TTY=1 ccp run -p 1 -- x)" = "CONFIG=unset ARGS=x" ] && [ "$(CCP_TEST_TTY=1 ccp run -- -p hi)" = "CONFIG=$P/acct-4 ARGS=-p hi" ]'
+ok "auto switch: off without a terminal" '[ "$(ccp run -- x)" = "CONFIG=$P/acct-4 ARGS=x" ]'
+rm -f "$P/default" "$P/full"
+
+# ccp service: a launchd job (launchctl stubbed)
+printf '%s\n' '#!/bin/bash' 'echo "$*" >> "$HOME/launchctl.log"' \
+  'if [ "$1" = print ]; then [ -f "$HOME/Library/LaunchAgents/ai.yunastudio.ccp.plist" ] && printf "\tpid = 4242\n"; fi' 'exit 0' > "$T/bin/launchctl"
+chmod +x "$T/bin/launchctl"
+export CCP_LAUNCHCTL="$T/bin/launchctl"
+PL="$HOME/Library/LaunchAgents/ai.yunastudio.ccp.plist"
+out="$(ccp service start --at 95 --every 120)"
+ok "service start: a launchd job that keeps ccp watch running" 'grep -q "<string>watch</string>" "$PL" && grep -q "<string>$ROOT/ccp</string>" "$PL" && grep -q "bootstrap gui/" "$HOME/launchctl.log" && has "$out" "reaches 95%"'
+ok "service start: keeps its settings for ccp watch" '[ "$(tr "\n" " " < "$P/auto")" = "at=95 every=120 " ]'
+if command -v plutil >/dev/null 2>&1; then ok "service start: a valid plist" 'plutil -lint "$PL" >/dev/null'; fi
+ok "service status: running, with its settings" 'has "$(ccp service status)" "running (pid 4242), at 95% · every 120s"'
+ccp service stop >/dev/null
+ok "service stop: unloads it and turns the switching off" '[ ! -e "$PL" ] && [ ! -e "$P/auto" ] && grep -q "bootout gui/" "$HOME/launchctl.log" && has "$(ccp service status)" "service: off"'
+ok "service: refuses odd numbers" '! ccp service start --at 0 2>/dev/null && ! ccp service start --every 5 2>/dev/null'
 
 V="$(sed -n 's/^VERSION="\(.*\)"/\1/p' "$ROOT/ccp")"
 ok "plugin ships the same ccp, one version everywhere" 'cmp -s "$ROOT/ccp" "$ROOT/plugin/bin/ccp" && grep -q "\"version\": \"$V\"" "$ROOT/plugin/.claude-plugin/plugin.json" && grep -q "version \"$V\"" "$ROOT/Formula/ccp.rb" && grep -q "download/v$V/ccp" "$ROOT/Formula/ccp.rb"'
 
-ok "help and version" 'has "$(ccp help)" "ccp add" && has "$(ccp --version)" "ccp 0.4"'
+ok "help and version" 'has "$(ccp help)" "ccp add" && has "$(ccp --version)" "ccp 0.5"'
 
 echo "$pass passed, $fail failed"
 [ "$fail" = 0 ]

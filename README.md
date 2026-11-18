@@ -67,6 +67,7 @@ ccp which                         # which account a run here would use, and why
 ccp usage                         # every account's limits once; ccp top keeps them live
 
 ccp run                           # start Claude Code with the account for this folder
+ccp service start                 # optional: move on when an account is full (below)
 ccp run -p 2 -- -c                # or a given one, with any claude arguments
 
 echo 'eval "$(ccp init zsh)"' >> ~/.zshrc   # optional: plain `claude` follows your profiles
@@ -88,6 +89,8 @@ so they keep pointing at the same account when you insert or move profiles.
 | `ccp which [dir]` | profile for a folder, and why |
 | `ccp run [-p n\|name] [-- claude args]` | run Claude Code with a profile |
 | `ccp sw <n\|name> [-- claude args]` | continue the last conversation here on another account (`--continue`) |
+| `ccp service start [--at 100] [--every 60]` · `stop` · `status` | in the background: move to the next account when the one in use is full |
+| `ccp watch [--at 100] [--every 60]` | the same in this terminal |
 | `ccp env [n\|name]` | `eval "$(ccp env 2)"` pins the current shell |
 | `ccp login <n\|name>` | sign a profile in again |
 | `ccp rm <n\|name> [--yes]` | sign out and delete a profile; the rest move up |
@@ -115,6 +118,29 @@ To always see which account you are on, put `ccp prompt` in Claude Code's status
 
 It prints `#2 work` for the account the session runs on, or add `$(ccp prompt)` to a status line script you already have.
 
+## Move on when an account is full
+
+Opt in, for accounts that are yours:
+
+```sh
+ccp service start              # macOS: a launchd job that starts again at login
+ccp service start --at 95      # switch a little before the limit
+ccp service status             # running?, the account new sessions use, full accounts, last log lines
+ccp service stop
+```
+
+Every minute it reads each account's usage (as `ccp top` does). When the account new sessions use (`ccp use`, or #1)
+reaches 100% of its 5-hour or weekly limit, it makes the next account with room the default and shows a notification.
+When the first account has room again, new sessions go back to it.
+
+A session started with `ccp run` (or plain `claude` after `ccp init`) that follows the default moves too: once Claude Code
+stops at the limit and the session is idle, `ccp` ends it and continues the same conversation on the new account
+(`claude --resume <that session>`, with options such as `--model` kept). A session that is busy (a turn, a tool, a
+question) is never cut short. Sessions on a folder rule, `-p` or `CCP_PROFILE` stay where you put them, and so do
+sessions started before the service, background jobs that are already running, and the desktop app.
+
+Elsewhere (Linux), keep `ccp watch` running under systemd `--user` or tmux. The log is `~/.claude-profiles/watch.log`.
+
 ## How it works
 
 Claude Code keeps everything in one config folder, `~/.claude`, or the folder in `CLAUDE_CONFIG_DIR`.
@@ -139,8 +165,8 @@ or put on a command line. An expired token is not refreshed: open that account o
 - If Claude Code rewrites a shared single file (for example `settings.json` after you change a setting inside a profile),
   that profile may end up with its own copy. Shared folders are not affected.
 - The desktop app and IDE extensions keep using `~/.claude`; `ccp` changes only what you start from a terminal.
-- **What it is not:** `ccp` does not move to another account when one reaches its usage limit, and it is not meant for
-  sharing accounts. Use accounts that are yours (personal, work, client) and follow Anthropic's terms for each.
+- **What it is not:** `ccp` is not meant for sharing accounts. Moving on when an account is full is off unless you
+  start it. Use accounts that are yours (personal, work, client) and follow Anthropic's terms for each.
 
 ## Test
 

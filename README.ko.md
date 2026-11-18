@@ -62,6 +62,7 @@ ccp mv 4 2                        # 순서 바꾸기
 ccp which                         # 여기서 몇 번으로 열리는지, 왜 그런지
 ccp usage                         # 계정마다 한도: 쓴 양 · 남은 양 · 초기화까지 (ccp top 은 실시간)
 ccp run                           # 이 폴더에 맞는 계정으로 Claude Code 실행
+ccp service start                 # 선택: 한도가 차면 다음 계정으로 (아래)
 
 echo 'eval "$(ccp init zsh)"' >> ~/.zshrc   # 선택: 그냥 `claude` 를 쳐도 규칙대로 열림
 ```
@@ -87,6 +88,27 @@ ccp sw work -- --resume   # 다른 대화를 골라 이어도 돼요
 { "statusLine": { "type": "command", "command": "ccp prompt" } }
 ```
 
+## 한도가 차면 다음 계정으로
+
+켜야 돌아요. 내 계정들에만 쓰세요.
+
+```sh
+ccp service start              # macOS: 백그라운드 서비스(launchd), 로그인하면 다시 켜져요
+ccp service start --at 95      # 한도 조금 전에 넘기기
+ccp service status             # 도는지 · 새 세션이 쓸 계정 · 찬 계정 · 마지막 기록
+ccp service stop
+```
+
+1분마다 계정별 사용량을 봐요(`ccp top` 과 같은 요청). 새 세션이 쓰는 계정(`ccp use`, 없으면 1번)이 5시간이나 주간 한도
+100%에 닿으면, 여유 있는 다음 계정을 기본으로 바꾸고 알림을 띄워요. 처음 계정에 여유가 다시 생기면 새 세션은 그 계정으로 돌아가요.
+
+`ccp run`(또는 `ccp init` 뒤의 그냥 `claude`)으로 띄워 기본 계정을 따르는 세션도 함께 넘어가요. Claude Code 가 한도에 걸려
+멈추고 세션이 쉬고 있으면, 그 세션을 끝내고 같은 대화를 새 계정에서 이어 열어요(`claude --resume <그 세션>`, `--model` 같은 옵션은
+그대로). 일하는 중인 세션(답하는 중 · 도구 실행 중 · 질문 중)은 끊지 않아요. 폴더 규칙 · `-p` · `CCP_PROFILE` 로 연 세션,
+서비스를 켜기 전에 연 세션, 이미 돌고 있는 백그라운드 작업, 데스크톱 앱은 그대로 둬요.
+
+Linux 에서는 `ccp watch` 를 systemd `--user` 나 tmux 로 띄워 두세요. 기록은 `~/.claude-profiles/watch.log` 에 남아요.
+
 ## 어떻게 되나
 
 Claude Code 는 설정 폴더(`~/.claude`, 또는 `CLAUDE_CONFIG_DIR`)를 하나 써요. `CLAUDE_CONFIG_DIR` 를 주면 로그인도 따로
@@ -101,7 +123,7 @@ Anthropic 사용량 주소(Claude 안의 `/usage` 와 같은 요청)에만 보�
 
 ## 알아 둘 것
 
-- 사용 한도가 찼을 때 다른 계정으로 알아서 넘어가는 기능은 없어요. 계정 공유용도 아니에요. 개인 · 회사 · 고객사처럼 내 계정을,
+- 계정 공유용이 아니에요. 한도가 차면 넘기는 기능은 직접 켜야 돌아요. 개인 · 회사 · 고객사처럼 내 계정을,
   각 계정의 Anthropic 약관대로 쓰세요.
 - 데스크톱 앱 · IDE 확장은 계속 `~/.claude` 를 써요. `ccp` 는 터미널에서 띄우는 것만 바꿔요.
 

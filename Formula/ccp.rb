@@ -1,9 +1,9 @@
 class Ccp < Formula
   desc "Several Claude Code accounts on one computer, with live usage per account"
   homepage "https://github.com/yuna-studio/claude-profiles"
-  url "https://github.com/yuna-studio/claude-profiles/releases/download/v0.4.0/ccp"
+  url "https://github.com/yuna-studio/claude-profiles/releases/download/v0.5.0/ccp"
   sha256 "24a81eae7a53e7cd4075e865ec991e75591a61acd057fc7d1193a2bf35f1fc10"
-  version "0.4.0"
+  version "0.5.0"
   license "MIT"
 
   def install
@@ -14,6 +14,7 @@ class Ccp < Formula
     <<~EOS
       Sign in once per account:   ccp add
       See every account's limits: ccp top
+      Move on when one is full:   ccp service start
       Optional, so plain `claude` follows your accounts:
         echo 'eval "$(ccp init zsh)"' >> ~/.zshrc
     EOS
