@@ -10,7 +10,7 @@ allowed-tools: Bash(ccp:*)
 2. Run `ccp sw <number or name>` with the Bash tool.
 3. Tell the user its answer in one short sentence, in their language, and end your turn. Nothing moves: `~/.claude` now
    holds that account's login, so this session and every other one stay in their list, folder and terminal, and their
-   tokens come from that account. A running background session keeps the token it holds until it runs out (hours at
-   most), then takes the new login; `claude respawn <id>` from another terminal switches it now, in place. A terminal
-   started through `ccp run` reopens this same conversation in place once the turn ends.
+   tokens come from that account. Each running background session, this one included, restarts in place once its turn
+   ends (`claude respawn`: same id, same conversation, same list) and uses the new login from then on; a terminal started
+   through `ccp run` reopens this same conversation in place the same way. Busy work is never cut short.
 4. `ccp use 1` brings #1's own login back.

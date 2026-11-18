@@ -287,9 +287,9 @@ EOF
   exists "$got" || return 1
   mkdir -p "$CCP_HOME"
   if [ "$got" = default ]; then rm -f "$CCP_HOME/slot"; else echo "$got" > "$CCP_HOME/slot"; fi
-  if [ "$changed" = 0 ]; then say "already on $(label "$got")'s login"; return 0; fi
-  say "Claude Code uses $(label "$got")'s login now; every session stays where it is"
-  readopt
+  if [ "$changed" = 0 ]; then say "already on $(label "$got")'s login"
+  else say "Claude Code uses $(label "$got")'s login now; every session stays where it is"; readopt; fi
+  respawn_running
   return 0
 }
 
@@ -306,9 +306,84 @@ readopt() {   # Claude Code's daemon reads the login when it starts and gives it
       n=$((n + 1)); [ "$n" -lt "${CCP_DAEMON_WAIT:-45}" ] || { say "background sessions take it once Claude Code's daemon is back (claude agents starts it)"; exit 0; }
       sleep 1; [ $((n % 10)) = 0 ] && "$c" agents --json >/dev/null 2>&1
     done
-    say "new background sessions start with it; running ones switch once the token they hold runs out (claude respawn <id> switches one now, in place)"
+    say "new background sessions start with it"
   )
   return 0
+}
+
+# A running session holds the token it read and keeps it until it runs out (hours). So that it takes the new login now,
+# each background session on ~/.claude restarts in place once it is idle: `claude respawn` keeps its id, its conversation
+# and its place in the list. A turn, a tool, a question or work it left running (a build, a shell) is never cut short.
+
+respawn_running() {   # one waiter (_respawn) per running background session on ~/.claude
+  local c n=0 pid short lock
+  [ -n "${CCP_NO_RESPAWN:-}" ] && return 0
+  c="$(real_claude 2>/dev/null)" || return 0
+  mkdir -p "$CCP_HOME/respawning"
+  while IFS="$TAB" read -r pid short; do
+    [ -n "$short" ] || continue
+    lock="$CCP_HOME/respawning/$short"
+    if ! mkdir "$lock" 2>/dev/null; then   # one is waiting already (it gives up after two hours)
+      [ -n "$(find "$lock" -maxdepth 0 -mmin +130 2>/dev/null)" ] || continue
+      rmdir "$lock" 2>/dev/null; mkdir "$lock" 2>/dev/null || continue
+    fi
+    detach "$CCP_HOME/respawn.log" _respawn "$pid" "$short"
+    n=$((n + 1))
+  done <<EOF
+$( (unset CLAUDE_CONFIG_DIR; "$c" agents --json --all 2>/dev/null) | python3 -c 'import json, os, sys
+try: rows = json.load(sys.stdin)
+except Exception: rows = []
+for x in rows if isinstance(rows, list) else []:
+    pid, short = x.get("pid"), x.get("id")
+    if x.get("kind") not in ("background", "bg") or not pid or not short or x.get("state") in ("failed", "stopped"):
+        continue
+    try: os.kill(int(pid), 0)
+    except Exception: continue
+    print("%s\t%s" % (pid, short))' 2>/dev/null)
+EOF
+  [ "$n" -gt 0 ] && say "$n running background session(s) restart in place once idle (same conversation, same list) and use it from then on"
+  return 0
+}
+
+cmd__respawn() {   # ccp _respawn <pid> <short id>: wait until that background session is idle, then restart it in place
+  local pid="$1" short="$2" n=0 st c
+  trap "rmdir $(printf '%q' "$CCP_HOME/respawning/$short") 2>/dev/null" EXIT   # respawn_running's lock
+  c="$(real_claude)" || exit 1
+  while kill -0 "$pid" 2>/dev/null; do   # the turn ends first, and the work it left running in the background
+    st="$(session_info "$BASE/sessions/$pid.json" | cut -f2)"
+    case "$st" in ""|idle) job_busy "$BASE" "$short" || break ;; esac
+    n=$((n + 1)); [ "$n" -lt 7200 ] || { say "$(date '+%F %T') $short: still busy after two hours; it switches when its token runs out"; return 1; }
+    sleep 1
+  done
+  kill -0 "$pid" 2>/dev/null || return 0   # it ended on its own
+  if (unset CLAUDE_CONFIG_DIR; "$c" respawn "$short") >/dev/null 2>&1; then say "$(date '+%F %T') $short: restarted in place on $(label "$(holder)")'s login"
+  else say "$(date '+%F %T') $short: claude respawn failed; it switches when its token runs out"; fi
+}
+
+job_busy() {   # job_busy <config folder> <short id>: the background job still runs work it started (a build, a shell); watches
+               # that never end on their own (an artifact's comments) do not count
+  python3 -c 'import json, sys
+try: f = (json.load(open(sys.argv[1])).get("inFlight") or {})
+except Exception: sys.exit(1)
+work = (f.get("tasks") or 0) - (f.get("drainableMonitors") or 0)
+sys.exit(0 if work > 0 or (f.get("queued") or 0) > 0 else 1)' "$1/jobs/$2/state.json" 2>/dev/null
+}
+
+detach() {   # detach <log> <ccp command...>: run ccp on its own, outside this session, so it outlives it
+  python3 - "$1" "$(self_path)" "${@:2}" <<'PY'
+import os, sys
+log, me, args = sys.argv[1], sys.argv[2], sys.argv[3:]
+if os.fork():
+    sys.exit(0)
+os.setsid()
+if os.fork():
+    os._exit(0)
+env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE") and k not in ("CCP_RUN", "CCP_ACTIVE")}
+null = os.open(os.devnull, os.O_RDONLY)
+out = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+os.dup2(null, 0); os.dup2(out, 1); os.dup2(out, 2)
+os.execve("/bin/bash", ["/bin/bash", me] + args, env)
+PY
 }
 
 IFS= read -r -d '' LOGIN_PY <<'PY' || true   # swap_login's keychain (or credentials file) work; tokens never reach a command line
@@ -556,7 +631,7 @@ sw_here() {   # inside Claude Code: that account's login from now on, for this s
     say "this session runs on a profile folder of its own (a folder rule, -p or CCP_PROFILE), so it keeps that account"
   elif [ -n "${CCP_RUN:-}" ]; then say "this conversation goes on in this terminal with that login once the turn ends"
   elif [ -n "${CLAUDE_JOB_DIR:-}" ]; then
-    say "this background session keeps the token it holds until it runs out; to switch now, from another terminal: claude respawn $(basename "$CLAUDE_JOB_DIR")"
+    say "this background session restarts in place once this turn ends (same conversation) and uses it from then on"
   else
     say "a terminal session started without ccp keeps the token it holds until it runs out (/exit, then claude --continue, takes it now)"
   fi
@@ -632,7 +707,7 @@ cmd_watch() {   # ccp watch [--at PERCENT] [--every SECONDS] [--once]: what `ccp
     esac
     shift
   done
-  at="${at:-100}"; every="${every:-60}"
+  at="${at:-99}"; every="${every:-60}"
   check_auto "$at" "$every"
   command -v python3 >/dev/null 2>&1 || die "watch needs python3"
   mkdir -p "$CCP_HOME"
@@ -660,7 +735,7 @@ cmd_service() {   # ccp service start [--at PERCENT] [--every SECONDS] | stop | 
     start)
       [ "$(uname -s)" = Darwin ] || [ -n "${CCP_LAUNCHCTL:-}" ] \
         || die "service: macOS only for now; elsewhere keep 'ccp watch' running (systemd --user, tmux)"
-      at="$(auto_get at)"; every="$(auto_get every)"; at="${at:-100}"; every="${every:-60}"
+      at="$(auto_get at)"; every="$(auto_get every)"; at="${at:-99}"; every="${every:-60}"
       while [ $# -gt 0 ]; do
         case "$1" in
           --at) shift; at="${1:-}" ;;
@@ -987,7 +1062,7 @@ def top():
 
 def watch():
     """One check for `ccp watch`: list full accounts, move the default off a full one, and back when it has room."""
-    home, at = os.environ["CCP_HOME_DIR"], float(os.environ.get("CCP_AT") or 100)
+    home, at = os.environ["CCP_HOME_DIR"], float(os.environ.get("CCP_AT") or 99)
     results = [fetch(r) for r in ROWS]
     by = {r["id"]: r for r in results}
 
@@ -1321,9 +1396,9 @@ ccp $VERSION — several Claude Code accounts on one computer, no logging in aga
   ccp which [dir]               which profile a claude run here would use, and why
   ccp run [-p n|name] [-- args] run Claude Code with the profile for here (or -p)
   ccp sw <n|name>               ccp use n, then the last conversation here goes on
-  ccp service start [--at 100]  in the background: when the account in use is full, ~/.claude takes the login of the
+  ccp service start [--at 99]   in the background: when the account in use is full, ~/.claude takes the login of the
                                 next one with room; sessions stay where they are   (stop · status)
-  ccp watch [--at 100]          the same in this terminal
+  ccp watch [--at 99]           the same in this terminal
   ccp env [n|name]              eval "\$(ccp env 2)": pin this shell to a profile
   ccp login <n|name>            sign a profile in again
   ccp rm <n|name> [--yes]       sign out and delete a profile
@@ -1349,6 +1424,7 @@ main() {
     env) cmd_env "$@" ;;
     run) cmd_run "$@" ;;
     sw|switch) cmd_sw "$@" ;;
+    _respawn) cmd__respawn "$@" ;;
     watch) cmd_watch "$@" ;;
     service) cmd_service "$@" ;;
     usage) cmd_usage once "$@" ;;

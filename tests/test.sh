@@ -22,6 +22,7 @@ case "${1:-}" in   # background sessions: stop, --bg --resume, agents
   --bg) case "${CLAUDE_CONFIG_DIR:-}" in *acct-5) echo "Workspace not trusted"; exit 1 ;; esac
         echo "bg-resume $3 CONFIG=${CLAUDE_CONFIG_DIR:-unset} FLAGS=${*:4}" >> "$HOME/stub.log"; echo "${3%%-*}" >> "$cfg/stub-agents"
         echo "backgrounded · ${3%%-*}"; exit 0 ;;
+  respawn) echo "respawn $2 CONFIG=${CLAUDE_CONFIG_DIR:-unset}" >> "$HOME/stub.log"; exit 0 ;;
   daemon) echo "daemon ${*:2} CONFIG=${CLAUDE_CONFIG_DIR:-unset}" >> "$HOME/stub.log"
           [ "${2:-}" = status ] && [ -f "$HOME/daemon-up" ] && echo "pid:     4242"; exit 0 ;;
   agents) echo "agents CONFIG=${CLAUDE_CONFIG_DIR:-unset}" >> "$HOME/stub.log"
@@ -258,9 +259,24 @@ rm -f "$HOME/stub.log" "$HOME/stub-run.out"; touch "$HOME/daemon-up"
 STUB_KIND=bg STUB_SID=abcd1234-0000 STUB_TICKS=20 STUB_RUN='export CLAUDE_JOB_DIR=/x/jobs/abcd1234; /bin/bash "$CCP_SRC" sw 3' CCP_SRC="$ROOT/ccp" \
   "$CCP_CLAUDE" --stay > "$T/bg.out" 2>&1
 ok "sw inside a background session: the login changes, the session runs on where it is" 'has "$(cat "$HOME/stub-run.out")" "Claude Code uses #3" && has "$(cat "$T/bg.out")" "ENDED" && ! grep -q "^stop \|^bg-resume\|^rm " "$HOME/stub.log"'
-ok "readopt: the daemon restarts with its sessions left running, and adopts them again" 'grep -q "^daemon stop --any --keep-workers CONFIG=unset$" "$HOME/stub.log" && grep -q "^agents CONFIG=unset$" "$HOME/stub.log" && has "$(cat "$HOME/stub-run.out")" "new background sessions start with it" && has "$(cat "$HOME/stub-run.out")" "claude respawn abcd1234"'
+ok "readopt: the daemon restarts with its sessions left running, and adopts them again" 'grep -q "^daemon stop --any --keep-workers CONFIG=unset$" "$HOME/stub.log" && grep -q "^agents CONFIG=unset$" "$HOME/stub.log" && has "$(cat "$HOME/stub-run.out")" "new background sessions start with it" && has "$(cat "$HOME/stub-run.out")" "restarts in place once this turn ends"'
 rm -f "$HOME/daemon-up" "$HOME/stub.log"; ccp use 1 >/dev/null
 ok "readopt: no daemon running, nothing to restart" '! grep -q "daemon stop" "$HOME/stub.log" 2>/dev/null'
+# running background sessions restart in place once idle, so they take the new login now
+rm -f "$HOME/stub.log"; rm -rf "$P/respawning"
+STUB_KIND=bg STUB_SID=cccc0000-4444 STUB_TICKS=60 "$CCP_CLAUDE" --stay > "$T/bg.out" 2>&1 &
+IDLE=$!
+STUB_KIND=bg STUB_SID=dddd0000-5555 STUB_STATUS=busy STUB_TICKS=25 "$CCP_CLAUDE" --stay > "$T/bg2.out" 2>&1 &
+BUSY=$!; sleep 0.3
+printf '[{"pid": %s, "id": "cccc0000", "kind": "background", "status": "idle"}, {"pid": %s, "id": "dddd0000", "kind": "background", "status": "busy"}, {"pid": 999999, "id": "eeee0000", "kind": "background"}]\n' "$IDLE" "$BUSY" > "$HOME/.claude/stub-agents.json"
+out="$(ccp use 3)"
+i=0; while ! grep -q "^respawn cccc0000" "$HOME/stub.log" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+ok "use: running background sessions restart in place once idle (claude respawn keeps id and conversation)" 'has "$out" "2 running background session(s) restart in place once idle" && grep -q "^respawn cccc0000 CONFIG=unset$" "$HOME/stub.log"'
+ok "use: a busy one is never cut short, a closed one is left alone" '! grep -q "dddd0000\|eeee0000" "$HOME/stub.log"'
+ok "use: asked again, a session still waiting gets no second waiter" 'has "$(ccp use 3)" "1 running background session(s)"'
+wait "$BUSY" 2>/dev/null; i=0; while [ -d "$P/respawning/dddd0000" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+ok "use: a session that ends while it waits is not started again, and its waiter lets go" '! grep -q "dddd0000" "$HOME/stub.log" && [ ! -d "$P/respawning/dddd0000" ]'
+kill "$IDLE" 2>/dev/null; wait "$IDLE" 2>/dev/null; rm -f "$HOME/.claude/stub-agents.json"; ccp use 1 >/dev/null
 rm -f "$P/full"
 
 # the status line: every account, its limits and when each resets, as ccp watch last saw them

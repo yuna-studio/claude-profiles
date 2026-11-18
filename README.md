@@ -94,8 +94,8 @@ move profiles.
 | `ccp which [dir]` | profile for a folder, and why |
 | `ccp run [-p n\|name] [-- claude args]` | run Claude Code with a profile |
 | `ccp sw <n\|name> [-- claude args]` | `ccp use n`, then the last conversation here goes on (`--continue`) |
-| `ccp service start [--at 100] [--every 60]` · `stop` · `status` | in the background: the next account's login when the one in use is full |
-| `ccp watch [--at 100] [--every 60]` | the same in this terminal |
+| `ccp service start [--at 99] [--every 60]` · `stop` · `status` | in the background: the next account's login when the one in use is full |
+| `ccp watch [--at 99] [--every 60]` | the same in this terminal |
 | `ccp env [n\|name]` | `eval "$(ccp env 2)"` pins the current shell |
 | `ccp login <n\|name>` | sign a profile in again |
 | `ccp rm <n\|name> [--yes]` | sign out and delete a profile; the rest move up |
@@ -119,10 +119,11 @@ stays in its list, its folder and its terminal; only the account its tokens come
 `~/.claude` stay as they are. Meanwhile the lent account keeps no renewable copy in its own folder (two copies renewing
 one login would sign one of them out); it gets the freshest copy back when you switch away from it.
 
-- **Background sessions** (`claude --bg`, the agent view): a running one keeps the token it holds until that runs out
-  (a few hours at most), then reads `~/.claude` again and goes on with the new login. `claude respawn <id>` restarts one
-  in place now (same id, same conversation, same list). `ccp use` also restarts Claude Code's daemon with
-  `claude daemon stop --keep-workers` (sessions keep running), so new background sessions start with the new login.
+- **Background sessions** (`claude --bg`, the agent view): a running session holds the token it read until that runs out
+  (hours), so `ccp use` restarts each one in place once it is idle, with `claude respawn` (same id, same conversation,
+  same list); a turn, a tool, a question or work it left running is never cut short. It also restarts Claude Code's
+  daemon with `claude daemon stop --keep-workers` (sessions keep running), so new background sessions start with the
+  new login. The waiters log to `~/.claude-profiles/respawn.log`.
 - **A terminal session** started with `ccp run` (or `claude` after `ccp init`) while `ccp service` is on reopens the same
   conversation in the same terminal once it is idle (`claude --resume`, options such as `--model` kept). A terminal
   that started `claude` without `ccp` keeps its token until it runs out (`/exit`, `claude --continue` takes it now).
@@ -147,13 +148,13 @@ Opt in, for accounts that are yours:
 
 ```sh
 ccp service start              # macOS: a launchd job that starts again at login
-ccp service start --at 95      # switch a little before the limit
+ccp service start --at 95      # switch earlier (default: at 99%)
 ccp service status             # running?, the account in use, full accounts, last log lines
 ccp service stop
 ```
 
 Every minute it reads each account's usage (as `ccp top` does). When the account in use (the one whose login `~/.claude`
-holds) reaches 100% of its 5-hour or weekly limit, `~/.claude` takes the login of the next account with room, as with
+holds) reaches 99% (`--at`) of its 5-hour or weekly limit, `~/.claude` takes the login of the next account with room, as with
 `ccp use`, and it shows a notification. When the first account has room again (or, kept aside, its limit has reset),
 its login goes back. Sessions stay where they are, as above; a busy one (a turn, a tool, a question) is never cut short.
 
