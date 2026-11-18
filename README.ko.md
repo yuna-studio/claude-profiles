@@ -37,7 +37,7 @@ brew tap yuna-studio/claude-profiles https://github.com/yuna-studio/claude-profi
 brew install ccp
 ```
 
-Claude Code 플러그인(Claude 안에서 `/ccp:usage` · `/ccp:accounts` · `/ccp:use` · `/ccp:switch`, 그리고 `ccp` 명령):
+Claude Code 플러그인(Claude 안에서 `/ccp:usage` · `/ccp:accounts` · `/ccp:use` · `/ccp:switch` · `/ccp:auto`, 그리고 `ccp` 명령):
 
 ```
 /plugin install ccp --marketplace yuna-studio/claude-profiles
@@ -118,7 +118,7 @@ Claude Code 안에서는 Claude 에게 「2번 계정으로 바꿔」라고 하�
 
 ```sh
 ccp service start              # macOS: 백그라운드 서비스(launchd), 로그인하면 다시 켜져요
-ccp service start --at 95      # 더 일찍 넘기기 (기본은 99%)
+ccp service start --at 95      # 더 일찍 넘기기 (기본은 99%), Claude Code 안에선 /ccp:auto 95
 ccp service status             # 도는지 · 지금 계정 · 찬 계정 · 마지막 기록
 ccp service stop
 ```

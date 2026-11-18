@@ -42,7 +42,7 @@ brew tap yuna-studio/claude-profiles https://github.com/yuna-studio/claude-profi
 brew install ccp
 ```
 
-As a Claude Code plugin (adds `/ccp:usage`, `/ccp:accounts`, `/ccp:use`, `/ccp:switch`, and `ccp` inside Claude Code):
+As a Claude Code plugin (adds `/ccp:usage`, `/ccp:accounts`, `/ccp:use`, `/ccp:switch`, `/ccp:auto`, and `ccp` inside Claude Code):
 
 ```
 /plugin install ccp --marketplace yuna-studio/claude-profiles
@@ -148,7 +148,7 @@ Opt in, for accounts that are yours:
 
 ```sh
 ccp service start              # macOS: a launchd job that starts again at login
-ccp service start --at 95      # switch earlier (default: at 99%)
+ccp service start --at 95      # switch earlier (default: at 99%); in Claude Code: /ccp:auto 95
 ccp service status             # running?, the account in use, full accounts, last log lines
 ccp service stop
 ```
