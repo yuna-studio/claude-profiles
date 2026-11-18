@@ -569,11 +569,13 @@ cmd__move() {   # ccp _move <from> <to> <pid> <sessionId> <short id> <cwd> [foll
   return 1
 }
 
-job_busy() {   # job_busy <config folder> <short id>: the background job still runs tasks it started (a build, a monitor)
+job_busy() {   # job_busy <config folder> <short id>: the background job still runs work it started (a build, a shell); watches
+               # that never end on their own (an artifact's comments) do not count
   python3 -c 'import json, sys
 try: f = (json.load(open(sys.argv[1])).get("inFlight") or {})
 except Exception: sys.exit(1)
-sys.exit(0 if (f.get("tasks") or 0) > 0 or (f.get("queued") or 0) > 0 else 1)' "$1/jobs/$2/state.json" 2>/dev/null
+work = (f.get("tasks") or 0) - (f.get("drainableMonitors") or 0)
+sys.exit(0 if work > 0 or (f.get("queued") or 0) > 0 else 1)' "$1/jobs/$2/state.json" 2>/dev/null
 }
 
 started_on() {   # started_on <id> <short id>: the session came up on that account (Claude Code says "backgrounded" first)

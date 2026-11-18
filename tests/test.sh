@@ -307,7 +307,12 @@ STUB_KIND=bg STUB_SID=eeee1111-8888 STUB_TICKS=80 "$CCP_CLAUDE" --stay > "$T/bg.
 BG=$!; sleep 0.3
 printf '[{"pid": %s, "id": "eeee1111", "sessionId": "eeee1111-8888", "cwd": "%s", "kind": "background"}]\n' "$BG" "$HOME" > "$HOME/.claude/stub-agents.json"
 ccp use 1 >/dev/null; ccp use 3 >/dev/null; sleep 1.5
-ok "follow: waits for the work a background job left running (a build, a monitor)" '! grep -q "eeee1111" "$HOME/stub.log" 2>/dev/null'
+ok "follow: waits for the work a background job left running (a build, a shell)" '! grep -q "eeee1111" "$HOME/stub.log" 2>/dev/null'
+echo '{"inFlight": {"tasks": 2, "queued": 0, "kinds": ["artifact_watch"], "drainableMonitors": 2}}' > "$T/watch-only.json"
+mkdir -p "$T/cfgw/jobs/w1" && cp "$T/watch-only.json" "$T/cfgw/jobs/w1/state.json"
+sed -n '/^job_busy() {/,/^}/p' "$ROOT/ccp" > "$T/job_busy.sh"
+mkdir -p "$T/cfgw/jobs/w2" && echo '{"inFlight": {"tasks": 3, "queued": 0, "kinds": ["artifact_watch", "local_bash"], "drainableMonitors": 2}}' > "$T/cfgw/jobs/w2/state.json"
+ok "follow: watching an artifact's comments is not work to wait for; a shell is" '( . "$T/job_busy.sh"; type job_busy >/dev/null && ! job_busy "$T/cfgw" w1 && job_busy "$T/cfgw" w2 )'
 ccp use 1 >/dev/null
 echo '{"inFlight": {"tasks": 0, "queued": 0}}' > "$HOME/.claude/jobs/eeee1111/state.json"
 i=0; while ! grep -q "changed meanwhile" "$P/move.log" && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
