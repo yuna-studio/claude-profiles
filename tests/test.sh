@@ -7,6 +7,7 @@ T="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/ccp-test.XXXXXX")" && pwd -P)"   # real pa
 trap 'rm -rf "$T"' EXIT
 export HOME="$T/home"; mkdir -p "$HOME/.claude/agents" "$T/bin"
 unset CCP_PROFILE CLAUDE_CONFIG_DIR CCP_HOME CCP_BASE CLAUDECODE CCP_RUN CCP_ACTIVE NO_COLOR
+export CCP_LANG=en
 echo '{"model":"x"}' > "$HOME/.claude/settings.json"
 echo '# mine' > "$HOME/.claude/CLAUDE.md"
 echo '{"mcpServers":{"docs":{"command":"docs-mcp"}},"oauthAccount":{"emailAddress":"me@x.com"}}' > "$HOME/.claude.json"
@@ -174,7 +175,7 @@ export CCP_NO_NOTIFY=1
 out="$(ccp watch --once --at 90)"
 ok "watch: a full account hands new sessions to the next one with room" 'has "$out" "#1 me@x.com is at 91% of its 5-hour limit" && has "$out" "New Claude Code sessions use #3 four@x.com" && [ "$(cat "$P/default")" = acct-4 ] && [ "$(cat "$P/moved")" = default ]'
 ok "watch: lists full accounts for running sessions" 'grep -q "^default	5-hour	91	" "$P/full"'
-ok "watch: keeps what it saw for ccp service status" 'grep -q "^default	5-hour 91%, week 48%$" "$P/seen" && grep -q "^acct-3	not logged in$" "$P/seen" && has "$(ccp service status)" "  #1 default: 5-hour 91%, week 48%"'
+ok "watch: keeps what it saw for ccp service status" 'grep -q "^default	5-hour 91%, week 48%	5h:91:[0-9]* wk:48:[0-9]*$" "$P/seen" && grep -q "^acct-3	not logged in	$" "$P/seen" && has "$(ccp service status)" "  #1 default: 5-hour 91%, week 48%"'
 out="$(ccp watch --once --at 95)"
 ok "watch: goes back once the first account has room" 'has "$out" "#1 me@x.com has room again" && [ ! -e "$P/default" ] && [ ! -e "$P/moved" ] && [ ! -s "$P/full" ]'
 ok "watch: quiet when nothing changes" '[ -z "$(ccp watch --once --at 95)" ]'
@@ -214,16 +215,20 @@ mkdir -p "$T/otherrun"; sleep 5 & OTHER=$!; echo "$OTHER" > "$T/otherrun/pid"
 ok "sw inside: never switches a session it does not run in" '! CLAUDECODE=1 CCP_RUN="$T/otherrun" ccp sw 3 2>/dev/null && [ ! -e "$T/otherrun/request" ]'
 kill "$OTHER" 2>/dev/null; wait "$OTHER" 2>/dev/null
 
-# the status line: every account and its limits, as ccp watch last saw them
-printf 'default\tweek 98%%\nacct-3\tnot logged in\nacct-4\t5-hour 3%%, week 17%%\nacct-5\tsign-in expired: open #4 once\n' > "$P/seen"
+# the status line: every account, its limits and when each resets, as ccp watch last saw them
+now=$(date +%s)
+printf 'default\tweek 98%%\twk:98:%s\nacct-3\tnot logged in\t\nacct-4\t5-hour 3%%, week 17%%\t5h:3:%s wk:17:%s\nacct-5\tsign-in expired: open #4 once\t\n' \
+  $((now + 4 * 86400 + 15 * 3600 + 90)) $((now + 4 * 3600 + 49 * 60 + 20)) $((now + 5 * 86400 + 21 * 3600 + 90)) > "$P/seen"
 out="$(NO_COLOR=1 CCP_ACTIVE=default ccp prompt --usage)"
-ok "status line: every account, the one in use marked" '[ "$out" = "▶ #1 wk 98%  ·  #2 no login  ·  #3 5h 3% wk 17%  ·  #4 expired  ·  #5  ·  #6" ]'
-ok "status line: a Claude Code started without ccp finds its account by its folder" 'has "$(NO_COLOR=1 CLAUDECODE=1 CLAUDE_CONFIG_DIR="$P/acct-4" ccp prompt --usage)" "▶ #3 5h 3%"'
-printf 'default\tweek\t100\t0\n' > "$P/full"; echo acct-4 > "$P/default"
-ok "status line: says where new sessions go once this account is full" 'has "$(NO_COLOR=1 CCP_ACTIVE=default ccp prompt --usage)" "→ new sessions #3"'
+ok "status line: this session's account stands out" 'has "$out" " ▶ #1 this session " && ! has "$out" "▶ #3" 2>/dev/null'
+ok "status line: every account, its limits and when each resets" 'has "$out" "week 98% (resets in 4d 15h)  ┃  #2  not logged in  ┃  #3  5h 3% (resets in 4h 49m)  week 17% (resets in 5d 21h)  ┃  #4  sign-in expired  ┃  #5  ┃  #6"'
+ok "status line: in Korean" 'has "$(NO_COLOR=1 CCP_LANG=ko CCP_ACTIVE=acct-4 ccp prompt --usage)" " ▶ #3 이 세션   5시간 3% (4시간 49분 뒤 리셋)  주간 17% (5일 21시간 뒤 리셋)"'
+ok "status line: a Claude Code started without ccp finds its account by its folder" 'has "$(NO_COLOR=1 CLAUDECODE=1 CLAUDE_CONFIG_DIR="$P/acct-4" ccp prompt --usage)" "▶ #3 this session"'
+echo acct-4 > "$P/default"
+ok "status line: where new sessions start, when that is another account" 'has "$(NO_COLOR=1 CCP_ACTIVE=default ccp prompt --usage)" "┃  new sessions → #3"'
 ok "status line: colors by how full" 'has "$(CCP_ACTIVE=default ccp prompt --usage)" "$(printf "\033[31m98%%")" && has "$(CCP_ACTIVE=default ccp prompt --usage)" "$(printf "\033[32m17%%")"'
 rm -f "$P/default" "$P/full" "$P/seen"
-ok "status line: without ccp service, just the accounts" '[ "$(NO_COLOR=1 CCP_ACTIVE=acct-4 ccp prompt --usage)" = "#1  ·  #2  ·  ▶ #3  ·  #4  ·  #5  ·  #6" ]'
+ok "status line: without ccp service, just the accounts" 'has "$(NO_COLOR=1 CCP_ACTIVE=acct-4 ccp prompt --usage)" "#1  ┃  #2  ┃   ▶ #3 this session   ┃  #4"'
 
 # ccp service: a launchd job (launchctl stubbed)
 printf '%s\n' '#!/bin/bash' 'echo "$*" >> "$HOME/launchctl.log"' \

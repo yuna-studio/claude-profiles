@@ -529,7 +529,7 @@ EOF
         local fid fname fused freset
         if [ -s "$CCP_HOME/seen" ]; then
           say "last check $(date -r "$CCP_HOME/seen" '+%H:%M:%S' 2>/dev/null || date -d "@$(stat -c %Y "$CCP_HOME/seen")" '+%H:%M:%S'):"
-          while IFS="$TAB" read -r fid fname; do [ -n "$fid" ] && exists "$fid" && say "  $(label "$fid"): $fname"; done < "$CCP_HOME/seen"
+          while IFS="$TAB" read -r fid fname fused; do [ -n "$fid" ] && exists "$fid" && say "  $(label "$fid"): $fname"; done < "$CCP_HOME/seen"
         fi
         while IFS="$TAB" read -r fid fname fused freset; do
           [ -n "$fid" ] && exists "$fid" && say "full: $(label "$fid") at ${fused}% of its $fname limit$( [ "${freset:-0}" -gt 0 ] 2>/dev/null && printf ' until %s' "$(date -r "$freset" '+%m-%d %H:%M' 2>/dev/null || date -d "@$freset" '+%m-%d %H:%M' 2>/dev/null)")"
@@ -794,9 +794,11 @@ def watch():
 
     full = {r["id"]: blocking(r) for r in results if blocking(r)}
     write("full", "".join(f"{i}\t{l['name']}\t{l['used']:.0f}\t{int(l['resets'] or 0)}\n" for i, l in full.items()))
-    write("seen", "".join(f"{r['id']}\t" + (r["error"] or ", ".join(f"{l['name']} {l['used']:.0f}%" for l in r["limits"]
-                                                                   if l["name"] in ("5-hour", "week")) or "no limits reported") + "\n"
-                          for r in results))   # what this check saw, for ccp service status
+    def seen(r):   # id, what a person reads (ccp service status), then name:used:resets for the status line
+        ls = [l for l in r["limits"] if l["name"] in ("5-hour", "week")]
+        text = r["error"] or ", ".join(f"{l['name']} {l['used']:.0f}%" for l in ls) or "no limits reported"
+        return f"{r['id']}\t{text}\t" + " ".join(f"{'5h' if l['name'] == '5-hour' else 'wk'}:{l['used']:.0f}:{int(l['resets'] or 0)}" for l in ls) + "\n"
+    write("seen", "".join(seen(r) for r in results))   # what this check saw
 
     def name(i):
         r = by[i]
@@ -881,28 +883,62 @@ EOF
   esac
 }
 
-status_line() {   # status_line <active id>: every account and its limits as ccp watch last saw them, the active one marked
-  local fresh=0 id i=0 out="" v to
+dur() {   # dur <seconds>: "4d 15h", "4h 49m", "12m" (or 4일 15시간 … in Korean)
+  local s="$1" d h m
+  [ "$s" -gt 0 ] 2>/dev/null || s=0
+  d=$((s / 86400)); h=$((s % 86400 / 3600)); m=$((s % 3600 / 60))
+  if [ "${2:-}" = ko ]; then
+    if [ "$d" -gt 0 ]; then printf '%s일 %s시간' "$d" "$h"; elif [ "$h" -gt 0 ]; then printf '%s시간 %s분' "$h" "$m"; else printf '%s분' "$m"; fi
+  else
+    if [ "$d" -gt 0 ]; then printf '%sd %sh' "$d" "$h"; elif [ "$h" -gt 0 ]; then printf '%sh %sm' "$h" "$m"; else printf '%sm' "$m"; fi
+  fi
+}
+
+status_line() {   # status_line <id of this session>: every account with its limits and resets as ccp watch last saw them
+  local lang=en now fresh=0 id i=0 out="" seg line text detail tok name rest used reset to
+  local on="" off="" bold="" dim="" red="" yellow="" green="" w_this="this session" w_5h="5h" w_wk="week" w_new="new sessions →"
+  case "${CCP_LANG:-${LC_ALL:-${LANG:-}}}" in ko*) lang=ko; w_this="이 세션"; w_5h="5시간"; w_wk="주간"; w_new="새 세션 →" ;; esac
+  if [ -z "${NO_COLOR:-}" ]; then
+    on="$(printf '\033[1;7m')"; off="$(printf '\033[0m')"; bold="$(printf '\033[1m')"; dim="$(printf '\033[2m')"
+    red="$(printf '\033[31m')"; yellow="$(printf '\033[33m')"; green="$(printf '\033[32m')"
+  fi
+  now="$(date +%s)"
   [ -n "$(find "$CCP_HOME/seen" -mmin -15 2>/dev/null)" ] && fresh=1
   for id in $(ids); do
-    i=$((i + 1)); v=""
-    [ "$fresh" = 1 ] && v="$(awk -F '\t' -v id="$id" '$1 == id { print $2; exit }' "$CCP_HOME/seen")"
-    case "$v" in
-      "") ;;
-      *%*) v=" $(printf '%s' "$v" | sed 's/5-hour /5h /; s/week /wk /; s/, / /g')" ;;
-      "sign-in expired"*) v=" expired" ;;
-      "not logged in") v=" no login" ;;
-      *) v=" ?" ;;
-    esac
-    out="$out${out:+  ·  }$( [ "$id" = "$1" ] && printf '▶ ')#$i$v"
+    i=$((i + 1)); text=""; detail=""
+    if [ "$fresh" = 1 ]; then
+      line="$(awk -F '\t' -v id="$id" '$1 == id { print $2 "\t" $3; exit }' "$CCP_HOME/seen")"
+      if [ -n "$line" ]; then text="${line%%"$TAB"*}"; detail="${line#*"$TAB"}"; fi
+    fi
+    if [ "$id" = "$1" ]; then seg="${on} ▶ #${i} ${w_this} ${off}"; else seg="${bold}#${i}${off}"; fi
+    if [ -n "$detail" ]; then
+      for tok in $detail; do   # 5h:3:1795012345
+        name="${tok%%:*}"; rest="${tok#*:}"; used="${rest%%:*}"; reset="${rest#*:}"
+        case "${name}" in 5h) name="${w_5h}" ;; *) name="${w_wk}" ;; esac
+        if [ "${used}" -ge 90 ] 2>/dev/null; then used="${red}${used}%${off}"
+        elif [ "${used}" -ge 70 ] 2>/dev/null; then used="${yellow}${used}%${off}"
+        else used="${green}${used}%${off}"; fi
+        seg="${seg}  ${name} ${used}"
+        if [ "${reset:-0}" -gt 0 ] 2>/dev/null; then
+          if [ "$lang" = ko ]; then seg="${seg} ${dim}($(dur $((reset - now)) ko) 뒤 리셋)${off}"
+          else seg="${seg} ${dim}(resets in $(dur $((reset - now))))${off}"; fi
+        fi
+      done
+    else
+      case "$text" in
+        "") ;;
+        "sign-in expired"*) seg="${seg}  ${dim}sign-in expired${off}" ;;
+        "not logged in") seg="${seg}  ${dim}not logged in${off}" ;;
+        *) seg="${seg}  ${dim}?${off}" ;;
+      esac
+    fi
+    out="${out}${out:+  ${dim}┃${off}  }${seg}"
   done
-  if [ -n "$1" ] && is_full "$1"; then
+  if [ -n "$1" ]; then   # where a new session starts, when that is another account
     to="$(cat "$CCP_HOME/default" 2>/dev/null)"; exists "$to" || to=default
-    [ "$to" = "$1" ] || out="$out  → new sessions #$(pos_of "$to")"
+    [ "$to" = "$1" ] || out="${out}  ${dim}┃${off}  ${w_new} ${bold}#$(pos_of "$to")${off}"
   fi
-  if [ -n "${NO_COLOR:-}" ]; then printf '%s' "$out"; return 0; fi
-  printf '%s' "$(printf '%s\n' "$out" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+%$/) {
-    v = $i + 0; $i = "\033[" (v >= 90 ? "31" : (v >= 70 ? "33" : "32")) "m" $i "\033[0m" } print }')"
+  printf '%s' "${out}"
 }
 
 cmd_prompt() {   # ccp prompt [--usage]: inside Claude Code the account it runs on ("#2 work"), in a shell the one `claude` would use
