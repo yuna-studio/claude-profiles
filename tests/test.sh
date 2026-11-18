@@ -221,8 +221,11 @@ printf 'default\tweek 98%%\twk:98:%s\nacct-3\tnot logged in\t\nacct-4\t5-hour 3%
   $((now + 4 * 86400 + 15 * 3600 + 90)) $((now + 4 * 3600 + 49 * 60 + 20)) $((now + 5 * 86400 + 21 * 3600 + 90)) > "$P/seen"
 out="$(NO_COLOR=1 CCP_ACTIVE=default ccp prompt --usage)"
 ok "status line: this session's account stands out" 'has "$out" " ▶ #1 this session " && ! has "$out" "▶ #3" 2>/dev/null'
-ok "status line: every account, its limits and when each resets" 'has "$out" "week 98% (resets in 4d 15h)  ┃  #2  not logged in  ┃  #3  5h 3% (resets in 4h 49m)  week 17% (resets in 5d 21h)  ┃  #4  sign-in expired  ┃  #5  ┃  #6"'
-ok "status line: in Korean" 'has "$(NO_COLOR=1 CCP_LANG=ko CCP_ACTIVE=acct-4 ccp prompt --usage)" " ▶ #3 이 세션   5시간 3% (4시간 49분 뒤 리셋)  주간 17% (5일 21시간 뒤 리셋)"'
+ok "status line: every account and when each limit resets, short for the others when there are many" 'has "$out" "week 98% (resets in 4d 15h)  ┃  #2  not logged in  ┃  #3 5h 3%(4h) week 17%(5d)  ┃  #4  sign-in expired  ┃  #5  ┃  #6"'
+ok "status line: in Korean" 'has "$(NO_COLOR=1 CCP_LANG=ko CCP_ACTIVE=acct-4 ccp prompt --usage)" "#1 주간 98%(4일)  ┃  #2  not logged in  ┃   ▶ #3 이 세션   5시간 3% (4시간 49분 뒤 리셋)  주간 17% (5일 21시간 뒤 리셋)"'
+mkdir -p "$T/two/acct-2" && echo isolated=0 > "$T/two/acct-2/.ccp" && printf 'default\nacct-2\n' > "$T/two/order"
+sed -n "1p;3p" "$P/seen" | sed "s/^acct-4/acct-2/" > "$T/two/seen"
+ok "status line: two accounts, both in full" '[ "$(NO_COLOR=1 CCP_HOME="$T/two" CCP_ACTIVE=default ccp prompt --usage)" = " ▶ #1 this session   week 98% (resets in 4d 15h)  ┃  #2  5h 3% (resets in 4h 49m)  week 17% (resets in 5d 21h)" ]'
 ok "status line: a Claude Code started without ccp finds its account by its folder" 'has "$(NO_COLOR=1 CLAUDECODE=1 CLAUDE_CONFIG_DIR="$P/acct-4" ccp prompt --usage)" "▶ #3 this session"'
 echo acct-4 > "$P/default"
 ok "status line: where new sessions start, when that is another account" 'has "$(NO_COLOR=1 CCP_ACTIVE=default ccp prompt --usage)" "┃  new sessions → #3"'
