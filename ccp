@@ -324,8 +324,8 @@ respawn_running() {   # one waiter (_respawn) per running background session on 
   while IFS="$TAB" read -r pid short; do
     [ -n "$short" ] || continue
     lock="$CCP_HOME/respawning/$short"
-    if ! mkdir "$lock" 2>/dev/null; then   # one is waiting already (it gives up after two hours)
-      [ -n "$(find "$lock" -maxdepth 0 -mmin +130 2>/dev/null)" ] || continue
+    if ! mkdir "$lock" 2>/dev/null; then   # one is waiting already (it gives up after a day)
+      [ -n "$(find "$lock" -maxdepth 0 -mmin +1450 2>/dev/null)" ] || continue
       rmdir "$lock" 2>/dev/null; mkdir "$lock" 2>/dev/null || continue
     fi
     detach "$CCP_HOME/respawn.log" _respawn "$pid" "$short"
@@ -354,8 +354,8 @@ cmd__respawn() {   # ccp _respawn <pid> <short id>: wait until that background s
   while kill -0 "$pid" 2>/dev/null; do   # the turn ends first, and the work it left running in the background
     st="$(session_info "$BASE/sessions/$pid.json" | cut -f2)"
     case "$st" in ""|idle) job_busy "$BASE" "$short" || break ;; esac
-    n=$((n + 1)); [ "$n" -lt 7200 ] || { say "$(date '+%F %T') $short: still busy after two hours; it switches when its token runs out"; return 1; }
-    sleep 1
+    n=$((n + 1)); [ "$n" -lt 17300 ] || { say "$(date '+%F %T') $short: still busy after a day; it switches when its token runs out"; return 1; }
+    if [ "$n" -lt 60 ]; then sleep 1; else sleep 5; fi   # a long job: look less often
   done
   kill -0 "$pid" 2>/dev/null || return 0   # it ended on its own
   local cut=0 sid; sid="$(session_info "$BASE/sessions/$pid.json" | cut -f1)"
