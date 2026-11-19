@@ -750,6 +750,44 @@ session_watch() {   # session_watch <run dir> <ccp pid> <login>: beside a termin
   done
 }
 
+as_left() {   # as_left <sessionId> <launch options...>: sets keep to those options, with the permission mode and model the
+              # conversation was last in (Shift+Tab, /model), so reopening it does not fall back to the ones it started with
+  local sid="$1" mode="" model="" l skip=0 a; shift
+  IFS="$TAB" read -r mode model <<EOF
+$(python3 - "$BASE/projects" "$sid" <<'PY' 2>/dev/null
+import glob, json, os, sys
+files = glob.glob(os.path.join(sys.argv[1], "*", sys.argv[2] + ".jsonl"))
+mode = model = ""
+for line in open(files[0]) if files else []:
+    try:
+        d = json.loads(line)
+    except ValueError:
+        continue
+    if d.get("type") == "user" and d.get("permissionMode"):
+        mode = d["permissionMode"]
+    m = (d.get("message") or {}).get("model") if d.get("type") == "assistant" and not d.get("isSidechain") else None
+    if m and not m.startswith("<"):
+        model = m
+print("%s\t%s" % (mode, model))
+PY
+)
+EOF
+  keep=()
+  for a in "$@"; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    case "$a" in
+      --permission-mode) [ -n "$mode" ] && { skip=1; continue; } ;;
+      --permission-mode=*) [ -n "$mode" ] && continue ;;
+      --model) [ -n "$model" ] && { skip=1; continue; } ;;
+      --model=*) [ -n "$model" ] && continue ;;
+    esac
+    keep+=("$a")
+  done
+  [ -n "$mode" ] && keep+=(--permission-mode "$mode")
+  [ -n "$model" ] && keep+=(--model "$model")
+  return 0
+}
+
 supervise() {   # supervise <claude> <args...>: ccp run on ~/.claude while ccp service is on. A terminal session reads its login
                 # once, so when another account's login is put in ~/.claude it reopens the same conversation in this terminal
   local c="$1" run rc=0 mon sid l was; shift
@@ -771,6 +809,7 @@ EOF
     sid="$(cat "$run/switch")"
     [ -t 0 ] && stty sane 2>/dev/null
     printf "\nccp: now on %s's login; this conversation goes on\n\n" "$(label "$(holder)")" >&2
+    as_left "$sid" ${keep[@]+"${keep[@]}"}   # the mode and model it had at the end, not the ones it started with
     set -- ${keep[@]+"${keep[@]}"} --resume "$sid"
   done
   rm -rf "$run"

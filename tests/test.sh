@@ -239,6 +239,16 @@ ccp use 3 >/dev/null
 wait "$SUP"; out="$(cat "$T/sup.out")"
 ok "login change: ends the idle terminal session" 'has "$out" "TERM CONFIG=unset"'
 ok "login change: reopens the same conversation in place, keeps options, not the prompt" 'has "$out" "ccp: now on #3" && has "$out" "CONFIG=unset ARGS=--model m --resume sid-1"'
+mkdir -p "$HOME/.claude/projects/-home"
+{ echo '{"type":"user","permissionMode":"default","message":{"role":"user","content":"hi"}}'
+  echo '{"type":"assistant","message":{"role":"assistant","model":"claude-a","content":[]}}'
+  echo '{"type":"user","permissionMode":"bypassPermissions","message":{"role":"user","content":"go"}}'
+  echo '{"type":"assistant","message":{"role":"assistant","model":"claude-b","content":[]}}'; } > "$HOME/.claude/projects/-home/sid-7.jsonl"
+STUB_SID=sid-7 CCP_TEST_TTY=1 CCP_POLL=0.2 ccp run -- --stay --model m --permission-mode default --verbose > "$T/sup.out" 2>&1 &
+SUP=$!; started "$HOME/.claude/sessions"
+ccp use 1 >/dev/null; wait "$SUP"; out="$(cat "$T/sup.out")"
+ok "login change: reopens with the mode and model it was last in (Shift+Tab, /model), not the ones it started with" 'has "$out" "CONFIG=unset ARGS=--verbose --permission-mode bypassPermissions --model claude-b --resume sid-7"'
+ccp use 3 >/dev/null
 STUB_STATUS=busy STUB_TICKS=20 CCP_TEST_TTY=1 CCP_POLL=0.2 ccp run -- --stay > "$T/sup.out" 2>&1 &
 SUP=$!; started "$HOME/.claude/sessions"
 ccp use 1 >/dev/null
