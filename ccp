@@ -11,7 +11,7 @@
 #
 # Works with bash 3.2 (stock macOS). https://github.com/yuna-studio/claude-profiles  ·  MIT
 set -u
-VERSION="0.5.0"
+VERSION="0.7.1"
 CCP_HOME="${CCP_HOME:-$HOME/.claude-profiles}"
 BASE="${CCP_BASE:-$HOME/.claude}"   # the default profile's folder: what other profiles share from
 TAB="$(printf '\t')"
@@ -821,7 +821,7 @@ auto_get() { sed -n "s/^$1=//p" "$CCP_HOME/auto" 2>/dev/null | head -1; }   # a 
 conf() {   # conf <key>: a setting from ccp config, or its default (every one is on)
   local v; v="$(sed -n "s/^$1=//p" "$CCP_HOME/config" 2>/dev/null | tail -1)"
   [ -n "$v" ] || [ "$1" != at ] || v="$(auto_get at)"
-  if [ -z "$v" ]; then case "$1" in at) v=99 ;; respawn|continue) v=on ;; esac; fi
+  if [ -z "$v" ]; then case "$1" in at) v=99 ;; respawn|continue|statusline|hook) v=on ;; esac; fi
   echo "$v"
 }
 
@@ -830,19 +830,27 @@ set_conf() {   # set_conf <key> <value>
   { grep -v "^$1=" "$CCP_HOME/config"; echo "$1=$2"; } > "$CCP_HOME/config.$$" && mv "$CCP_HOME/config.$$" "$CCP_HOME/config"
 }
 
-cmd_config() {   # ccp config [at <percent> | respawn on|off | continue on|off]
+cmd_config() {   # ccp config [at <percent> | respawn on|off | continue on|off | statusline on|off | hook on|off]
   local k="${1:-}" v="${2:-}"
   if [ -z "$k" ]; then
-    printf '%-9s %-5s %s\n' at "$(conf at)%" "switch to the next account with room at this share of a 5-hour or weekly limit (ccp service)"
-    printf '%-9s %-5s %s\n' respawn "$(conf respawn)" "after a switch, each running background session restarts in place once idle and uses the new login"
-    printf '%-9s %-5s %s\n' continue "$(conf continue)" "a session the limit cut off goes on by itself after that restart"
+    printf '%-10s %-5s %s\n' at "$(conf at)%" "switch to the next account with room at this share of a 5-hour or weekly limit (ccp service)"
+    printf '%-10s %-5s %s\n' respawn "$(conf respawn)" "after a switch, each running background session restarts in place once idle and uses the new login"
+    printf '%-10s %-5s %s\n' continue "$(conf continue)" "a session the limit cut off goes on by itself after that restart"
+    printf '%-10s %-5s %s\n' statusline "$(conf statusline)" "every account's limits under Claude Code's prompt; ccp setup puts them there unless off (ccp statusline)"
+    printf '%-10s %-5s %s\n' hook "$(conf hook)" "a session that hits a usage limit makes ccp switch at once, not at the next check (ccp service puts it in)"
     return 0
   fi
   case "$k" in
     at) [ -n "$v" ] || { conf at; return 0; }; v="${v%\%}"; check_auto "$v" 60 ;;
-    respawn|continue) [ -n "$v" ] || { conf "$k"; return 0; }
-      case "$v" in on|off) ;; *) die "config: $k takes on or off" ;; esac ;;
-    *) die "usage: ccp config [at <1-100> | respawn on|off | continue on|off]" ;;
+    respawn|continue|statusline|hook) [ -n "$v" ] || { conf "$k"; return 0; }
+      case "$v" in on|off) ;; *) die "config: $k takes on or off" ;; esac
+      if [ "$k" = statusline ]; then cmd_statusline "$v"; return; fi   # remembers it and changes settings.json now
+      if [ "$k" = hook ]; then
+        set_conf hook "$v"
+        if [ "$v" = on ]; then setup_hook "$(self_path)"; else hook_edit off; fi
+        return 0
+      fi ;;
+    *) die "usage: ccp config [at <1-100> | respawn on|off | continue on|off | statusline on|off | hook on|off]" ;;
   esac
   set_conf "$k" "$v"
   if [ "$k" = at ] && [ -f "$CCP_HOME/auto" ]; then   # ccp watch reads it on its next check
@@ -861,7 +869,7 @@ check_auto() {   # check_auto <at> <every>: the numbers ccp watch takes
 }
 
 cmd_watch() {   # ccp watch [--at PERCENT] [--every SECONDS] [--once]: what `ccp service` keeps running
-  local at="" every once=0 b w now_at
+  local at="" every once=0 w now_at
   every="$(auto_get every)"
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -886,10 +894,26 @@ cmd_watch() {   # ccp watch [--at PERCENT] [--every SECONDS] [--once]: what `ccp
       exists "$w" && swap_login "$w"
     fi
     [ "$once" = 1 ] && return 0
-    b="$(cat "$CCP_HOME/backoff" 2>/dev/null)"; case "$b" in ""|*[!0-9]*) b=0 ;; esac
-    if [ "$b" -gt "$every" ]; then sleep "$b"; else sleep "$every"; fi   # the usage endpoint asked for less
+    sleep $(( every - every / 10 + RANDOM % (every / 5 + 1) ))   # a little apart from the other computers that ask about the same accounts
   done
 }
+
+cmd_limit_hit() {   # ccp limit-hit: Claude Code's StopFailure hook (a turn ended on a usage limit). Check now, not at the next round of
+                    # ccp watch. Only a session on the login in ~/.claude moves: one on a folder rule or -p keeps its own account
+  local id h
+  watching || return 0   # no ccp watch running: nothing switches by itself
+  if [ -n "${CCP_ACTIVE:-}" ]; then id="$(ref "$CCP_ACTIVE" 2>/dev/null)"
+  elif [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then return 0
+  else id=default; fi
+  h="$(holder)"; [ "$id" = default ] && id="$h"
+  [ "$id" = "$h" ] || return 0
+  [ -z "$(find "$CCP_HOME/hit" -mmin -1 2>/dev/null)" ] || return 0   # a check began a minute ago: the other sessions that hit it wait for it
+  : > "$CCP_HOME/hit"
+  nohup "$(self_path)" _limit_hit >> "$CCP_HOME/watch.log" 2>&1 < /dev/null &   # in the background: the hook returns at once
+  return 0
+}
+
+cmd__limit_hit() { CCP_LIMIT_HIT=1 cmd_watch --once; }   # the check: the account in use counts as full unless the numbers say a burst
 
 xml() { printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
 
@@ -916,6 +940,8 @@ cmd_service() {   # ccp service start [--at PERCENT] [--every SECONDS] | stop | 
       self="$(self_path)"
       mkdir -p "$CCP_HOME" "$(dirname "$plist")"
       printf 'at=%s\nevery=%s\n' "$at" "$every" > "$CCP_HOME/auto"
+      case "$(statusline_edit state)" in on*) setup_statusline "$self" >/dev/null ;; esac   # ccp's status line: redrawn as often
+      setup_hook "$self" >/dev/null || true   # a session that hits a limit starts a check at once (ccp config hook off: not)
       cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -950,7 +976,8 @@ EOF
       ;;
     stop)
       "$lc" bootout "$dom/$AGENT" >/dev/null 2>&1 || true
-      rm -f "$plist" "$CCP_HOME/auto" "$CCP_HOME/full" "$CCP_HOME/seen" "$CCP_HOME/moved" "$CCP_HOME/stuck"
+      rm -f "$plist" "$CCP_HOME/auto" "$CCP_HOME/full" "$CCP_HOME/seen" "$CCP_HOME/moved" "$CCP_HOME/stuck" "$CCP_HOME/hit" "$CCP_HOME/asked"
+      hook_edit off >/dev/null 2>&1 || true   # nothing is watching: the hook would do nothing
       say "stopped; Claude Code keeps using $(label "$(holder)")'s login"
       ;;
     status)
@@ -965,7 +992,10 @@ EOF
         local fid fname fused freset
         if [ -s "$CCP_HOME/seen" ]; then
           say "last check $(date -r "$CCP_HOME/seen" '+%H:%M:%S' 2>/dev/null || date -d "@$(stat -c %Y "$CCP_HOME/seen")" '+%H:%M:%S'):"
-          while IFS="$TAB" read -r fid fname fused; do [ -n "$fid" ] && exists "$fid" && say "  $(label "$fid"): $fname"; done < "$CCP_HOME/seen"
+          while IFS="$TAB" read -r fid fname fused; do
+            case "$fname" in "needs renewal"*|"sign-in expired"*) ;; *) case "$fused" in *expired*) fname="$fname (needs renewal)" ;; esac ;; esac   # the numbers are the last ones read
+            [ -n "$fid" ] && exists "$fid" && say "  $(label "$fid"): $fname"
+          done < "$CCP_HOME/seen"
         fi
         while IFS="$TAB" read -r fid fname fused freset; do
           [ -n "$fid" ] && exists "$fid" && say "full: $(label "$fid") at ${fused}% of its $fname limit$( [ "${freset:-0}" -gt 0 ] 2>/dev/null && printf ' until %s' "$(date -r "$freset" '+%m-%d %H:%M' 2>/dev/null || date -d "@$freset" '+%m-%d %H:%M' 2>/dev/null)")"
@@ -1141,7 +1171,7 @@ def limits(u):
     return sorted(out, key=lambda x: order.get(x["name"], 2))
 
 
-def fetch(row):
+def fetch(row, ask=True):
     c = creds(row)
     aside = SLOT != "default" and row["id"] == "default"
     r = {"n": int(row["n"]), "id": row["id"], "label": row["label"], "email": email(row["dir"]), "plan": plan(c), "limits": [], "error": None,
@@ -1150,7 +1180,10 @@ def fetch(row):
         r["error"] = "not logged in"
         return r
     if c.get("expiresAt") and c["expiresAt"] / 1000 < time.time():
-        r["error"] = "kept aside; numbers when it is back in use" if aside else f"sign-in expired: open #{row['n']} once (ccp run -p {row['n']})"
+        r["error"] = "kept aside; numbers when it is back in use" if aside else f"needs renewal: open #{row['n']} once (ccp run -p {row['n']})"
+        return r
+    if not ask:   # not asked this round: ccp watch uses its last good numbers
+        r["cached"] = True
         return r
     req = urllib.request.Request(URL, headers={"Authorization": "Bearer " + c["accessToken"], "anthropic-beta": "oauth-2025-04-20",
                                                "User-Agent": "ccp/" + os.environ.get("CCP_VERSION", "")})
@@ -1158,10 +1191,47 @@ def fetch(row):
         with urllib.request.urlopen(req, timeout=15) as f:
             r["limits"] = limits(json.load(f))
     except urllib.error.HTTPError as e:
-        r["error"] = {401: f"sign-in expired: open #{row['n']} once (ccp run -p {row['n']})", 429: "asked too often; next refresh"}.get(e.code, f"usage unavailable (HTTP {e.code})")
+        r["error"] = {401: f"needs renewal: open #{row['n']} once (ccp run -p {row['n']})", 429: "asked too often; next refresh"}.get(e.code, f"usage unavailable (HTTP {e.code})")
     except Exception:
         r["error"] = "offline or usage unavailable"
     return r
+
+
+RETRY_WAIT = float(os.environ.get("CCP_RETRY_WAIT") or 3)   # seconds before ccp watch asks the account in use again
+HIT = os.environ.get("CCP_LIMIT_HIT") == "1"                 # a session just hit a limit (ccp limit-hit started this check)
+
+
+EXPIRED = ("needs renewal", "sign-in expired")   # an access token that ran out (older ccp wrote the second)
+IDLE_EVERY = float(os.environ.get("CCP_IDLE_EVERY") or 300)   # seconds between asking about an account that is not in use (0: every round)
+
+
+def fetch_retry(row, tries=2):
+    """The account in use is the one that matters: a passing 'asked too often' must not hide that it is full."""
+    r = fetch(row)
+    for _ in range(tries - 1):
+        if not (r["error"] or "").startswith(("asked too often", "usage unavailable", "offline")):
+            break
+        time.sleep(RETRY_WAIT)
+        r = fetch(row)
+    return r
+
+
+def cached_limits(line):
+    """The limits in the last good line of an account, as fetch() gives them; a window that has reset since reads 0."""
+    f = line.rstrip("\n").split("\t")
+    out = []
+    for part in (f[2].split() if len(f) > 2 else []):
+        key, _, rest = part.partition(":")
+        used, _, resets = rest.partition(":")
+        name = "5-hour" if key == "5h" else "week" if key == "wk" else "week · " + key[2:].replace("_", " ") if key.startswith("m.") else None
+        try:
+            used = float(used)
+            reset = int(resets) if resets.isdigit() and int(resets) > 0 else None
+        except ValueError:
+            continue
+        if name:
+            out.append({"name": name, "used": 0.0 if reset and reset < time.time() else used, "resets": reset})
+    return out
 
 
 def ago(sec):
@@ -1231,8 +1301,7 @@ def top():
 def watch():
     """One check for `ccp watch`: list full accounts, move the default off a full one, and back when it has room."""
     home, at = os.environ["CCP_HOME_DIR"], float(os.environ.get("CCP_AT") or 99)
-    results = [fetch(r) for r in ROWS]
-    by = {r["id"]: r for r in results}
+    now = time.time()
 
     def path(name):
         return os.path.join(home, name)
@@ -1256,47 +1325,122 @@ def watch():
         except FileNotFoundError:
             pass
 
-    def blocking(r):   # the 5-hour or week limit that stops this account, the one that frees up last
-        hit = [l for l in r["limits"] if l["name"] in ("5-hour", "week") and l["used"] >= at] if not r["error"] else []
+    def blocking(r, level=None):   # the 5-hour or week limit that stops this account, the one that frees up last
+        lv = at if level is None else level
+        hit = [l for l in r["limits"] if l["name"] in ("5-hour", "week") and l["used"] >= lv] if not r["error"] else []
         return max(hit, key=lambda l: l["resets"] or 0) if hit else None
+
+    before, prev = {}, {}   # the last line per account that had numbers (a passing hiccup keeps them), and the last line at all
+    for line in read("seen").splitlines():
+        f = line.split("\t")
+        prev[f[0]] = line + "\n"
+        if len(f) >= 3 and f[2]:
+            before[f[0]] = line + "\n"
+    asked = {}   # per account not in use: when to ask again, and the pause 'asked too often' set (0 when it answered)
+    for line in read("asked").splitlines():
+        f = line.split("\t")
+        try:
+            asked[f[0]] = (float(f[1]), int(f[2]))
+        except (IndexError, ValueError):
+            pass
+
+    in_use = SLOT if any(r["id"] == SLOT for r in ROWS) else "default"
+    by = {in_use: fetch_retry(next(r for r in ROWS if r["id"] == in_use))}   # every round: it is the one that switches
+    urgent = HIT or blocking(by[in_use]) is not None   # about to hand over: the account it hands over to needs today's numbers
+
+    def may_ask(i):   # an account not in use is asked every IDLE_EVERY seconds, or after the pause 'asked too often' set
+        nxt, pause = asked.get(i, (0.0, 0))
+        return IDLE_EVERY <= 0 or now >= nxt or (urgent and pause == 0)
+
+    for row in ROWS:
+        if row["id"] in by:
+            continue
+        i = row["id"]
+        r = fetch(row, ask=may_ask(i))
+        if r.get("cached"):
+            if i in before:
+                r["limits"] = cached_limits(before[i])
+            elif i in prev:   # no numbers were ever read for it: what it said last (asked too often, sign-in expired) stands
+                r["error"] = prev[i].split("\t")[1]
+            else:
+                r = fetch(row)   # never seen: ask now
+        by[i] = r
+    results = [by[r["id"]] for r in ROWS]
 
     full = {r["id"]: blocking(r) for r in results if blocking(r)}
     write("full", "".join(f"{i}\t{l['name']}\t{l['used']:.0f}\t{int(l['resets'] or 0)}\n" for i, l in full.items()))
-    before = {}   # the last good line per account: a passing hiccup (asked too often, offline) keeps it
-    for line in read("seen").splitlines():
-        f = line.split("\t")
-        if len(f) >= 3 and f[2]:
-            before[f[0]] = line + "\n"
+
     def transient(r):
-        return r["error"] and not r["error"].startswith(("not logged in", "sign-in expired"))
-    def seen(r):   # id, what a person reads (ccp service status), then name:used:resets for the status line
-        if transient(r) and r["id"] in before:
-            return before[r["id"]]
+        return r["error"] and not r["error"].startswith(("not logged in",) + EXPIRED)
+
+    def seen(r):   # id, what a person reads (ccp service status), name:used:resets for the status line, when it was read, a note
+        i = r["id"]
+        if r.get("cached"):
+            return before.get(i) or prev[i]
+        old = before.get(i, "").rstrip("\n").split("\t")
+        if r["error"] and i in before and (transient(r) or r["error"].startswith(EXPIRED)):
+            note = "expired" if r["error"].startswith(EXPIRED) else ""   # the numbers stay, the status line says why they are old
+            return "\t".join(old[0:3] + [old[3] if len(old) > 3 else ""] + ([note] if note else [])) + "\n"
+        if r["error"] and r["error"].startswith(EXPIRED):
+            return f"{i}\t{r['error']}\t\t\texpired\n"
         ls = [l for l in r["limits"] if l["name"] in ("5-hour", "week")]
         ms = [l for l in r["limits"] if l["name"].startswith("week · ")]   # a model's own weekly limit (Fable)
+
         def key(l):
             return "5h" if l["name"] == "5-hour" else "wk" if l["name"] == "week" else "m." + l["name"][7:].replace(" ", "_")
         text = r["error"] or ", ".join(f"{l['name']} {l['used']:.0f}%" for l in ls) or "no limits reported"
-        return f"{r['id']}\t{text}\t" + " ".join(f"{key(l)}:{l['used']:.0f}:{int(l['resets'] or 0)}" for l in ls + ms) + "\n"
+        keys = " ".join(f"{key(l)}:{l['used']:.0f}:{int(l['resets'] or 0)}" for l in ls + ms)
+        return f"{i}\t{text}\t{keys}" + ("" if r["error"] else f"\t{int(now)}") + "\n"
     write("seen", "".join(seen(r) for r in results))   # what this check saw
-    if any((r["error"] or "").startswith("asked too often") for r in results):   # back off: ask half as often, up to 10 min
-        write("backoff", str(min(600, max(int(read("backoff") or 0), EVERY) * 2)))
-    else:
-        remove("backoff")
 
     def name(i):
         r = by[i]
         return f"#{r['n']} {r['email']}" if r["email"] != "-" else r["label"]
 
+    for r in results:   # an account not in use that says 'asked too often' waits twice as long each time, up to 10 min; the others go on
+        i, err = r["id"], r["error"] or ""
+        if i == in_use or r.get("cached"):
+            continue
+        if err.startswith(("asked too often", "usage unavailable", "offline")):
+            pause = min(600, max(asked.get(i, (0.0, 0))[1], 60) * 2)
+            why = "the usage endpoint says asked too often" if err.startswith("asked") else err
+            print(time.strftime("%Y-%m-%d %H:%M:%S ") + f"{name(i)}: {why}; asking about it again in {pause}s", flush=True)
+        else:
+            pause = 0
+        asked[i] = (now + (pause or IDLE_EVERY), pause)
+    write("asked", "".join(f"{i}\t{int(nxt)}\t{p}\n" for i, (nxt, p) in asked.items() if i in by))
+
     def frees(l):
         return f", free in {ago(l['resets'] - time.time())}" if l["resets"] else ""
+
+    def last_used(i):   # it cannot be asked now: its last good numbers, the fullest 5-hour or week limit that has not reset since
+        f = before.get(i, "").rstrip("\n").split("\t")   # None when never seen
+        if len(f) < 3 or not f[2]:
+            return None
+        top = 0.0
+        for part in f[2].split():
+            key, _, rest = part.partition(":")
+            used, _, resets = rest.partition(":")
+            if key in ("5h", "wk"):
+                try:
+                    if not (resets.isdigit() and 0 < int(resets) < time.time()):
+                        top = max(top, float(used))
+                except ValueError:
+                    pass
+        return top
+
+    def last_room(i):   # by its last good numbers it has room; a try when never seen
+        u = last_used(i)
+        return u is None or u < at
 
     def room(r, unknown_ok):   # its login can take over in ~/.claude
         if r["id"] in full or not r["lendable"]:
             return False
         if not r["error"]:
             return True
-        return unknown_ok and r["error"].startswith("sign-in expired")   # Claude Code renews it when it starts
+        if r["error"].startswith(EXPIRED):
+            return unknown_ok   # Claude Code renews it when it starts
+        return unknown_ok and transient(r) and last_room(r["id"])
 
     def tell(msg):
         print(time.strftime("%Y-%m-%d %H:%M:%S ") + msg, flush=True)
@@ -1315,6 +1459,15 @@ def watch():
         write("want", i + "\n")
 
     cur = SLOT if SLOT in by else "default"
+    if HIT and cur not in full:   # a session just hit a limit: believe it, unless the numbers say it was only a burst
+        r = by[cur]
+        if r["error"]:   # cannot be asked: the limit error is the evidence, unless its last numbers were low (a session still on the
+            lu = last_used(cur)   # token of the account ccp just left says nothing about this one)
+            l = {"name": "5-hour", "used": 100.0, "resets": None} if lu is None or lu >= 80 else None
+        else:
+            l = blocking(r, min(at, 90))
+        if l:
+            full[cur] = l
     moved, _, mfree = read("moved").partition("\t")   # the account it first switched from, and when that one frees up
     if cur in full:
         l = full[cur]
@@ -1386,32 +1539,150 @@ setup_shell() {   # setup_shell <ccp>: the shell start-up file runs `ccp init`, 
   say "✓ shell: $rc runs ccp init (new terminals)"
 }
 
-setup_statusline() {   # setup_statusline <ccp>: every account's limits under Claude Code's prompt
-  local me="$1"
-  case "$me" in "$HOME"/.claude*/plugins/*) me=ccp ;; esac   # a plugin's copy moves with each update
-  python3 - "$BASE/settings.json" "$me prompt --usage" <<'PY'
+statusline_edit() {   # statusline_edit on <command> <seconds> | off | state: the status line in ~/.claude/settings.json. ccp
+                      # changes only its own (a command with "ccp prompt"), never yours. on, off: exit 0 changed, 3 nothing to
+                      # change, 1 not valid JSON. state: "on<TAB>seconds" (empty: no timer), "off<TAB>" or "yours<TAB>command"
+  python3 - "$BASE/settings.json" "$@" <<'PY'
 import json, os, sys
-path, cmd = sys.argv[1], sys.argv[2]
+path, what = sys.argv[1], sys.argv[2]
 try:
     with open(path) as f:
         s = json.load(f)
 except FileNotFoundError:
     s = {}
-cur = (s.get("statusLine") or {}).get("command", "")
-if cur and "ccp prompt" not in cur:
-    print("· status line: yours stays (" + cur + "); add $(ccp prompt --usage) to it if you like")
+except Exception:
+    print("· status line: " + path + " is not valid JSON; left alone")
+    sys.exit(1)
+line = s.get("statusLine") or {}
+cur = line.get("command", "")
+mine = "ccp prompt" in cur
+if what == "state":
+    print(("on\t" + str(line.get("refreshInterval", ""))) if mine else ("yours\t" + cur) if cur else "off\t")
     sys.exit(0)
-if cur == cmd:
-    print("✓ status line: already shows every account's limits")
-    sys.exit(0)
-s["statusLine"] = {"type": "command", "command": cmd}
+if cur and not mine:
+    print("· status line: yours stays (" + cur + ")" + ("; add $(ccp prompt --usage) to it if you like" if what == "on" else ""))
+    sys.exit(3)
+if what == "on":
+    # refreshInterval: Claude Code runs the command again every N seconds, not only when the conversation changes, so an
+    # idle session shows what ccp service saw last
+    cmd, every = sys.argv[3], int(sys.argv[4])
+    if cur == cmd and line.get("refreshInterval") == every:
+        print("✓ status line: already shows every account's limits, redrawn every %ds" % every)
+        sys.exit(3)
+    s["statusLine"] = dict(line, type="command", command=cmd, refreshInterval=every)
+    done = "✓ status line: every account's limits under the prompt, redrawn every %ds" % every
+elif mine:
+    del s["statusLine"]
+    done = "✓ status line: removed"
+else:
+    print("✓ status line: already off")
+    sys.exit(3)
 tmp = path + ".ccp-tmp"
 with open(tmp, "w") as f:
     json.dump(s, f, indent=2, ensure_ascii=False)
     f.write("\n")
 os.replace(tmp, path)
-print("✓ status line: every account's limits under the prompt")
+print(done)
 PY
+}
+
+setup_statusline() {   # setup_statusline <ccp>: every account's limits under Claude Code's prompt, unless ccp statusline off;
+                       # redrawn as often as ccp service checks (--every, 60 s). ccp prompt --usage reads only ~/.claude-profiles
+                       # (seen), never the usage endpoint, so running it on a timer in every session costs no requests
+  local me="$1" every
+  if [ "$(conf statusline)" = off ]; then say "· status line: off, as you set it (ccp statusline on)"; return 3; fi
+  case "$me" in "$HOME"/.claude*/plugins/*) me=ccp ;; esac   # a plugin's copy moves with each update
+  every="$(auto_get every)"; case "$every" in ""|*[!0-9]*) every=60 ;; esac
+  statusline_edit on "$me prompt --usage" "$every"
+}
+
+hook_edit() {   # hook_edit on <command> | off | state: ccp's StopFailure hook in ~/.claude/settings.json (a command with "ccp limit-hit";
+                # yours stay). Claude Code runs it when a turn ends on a usage limit, so ccp switches at once instead of at the next
+                # check. on, off: exit 0 changed, 3 nothing to change, 1 not valid JSON. state: on or off
+  python3 - "$BASE/settings.json" "$@" <<'PY'
+import json, os, sys
+path, what = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f:
+        s = json.load(f)
+except FileNotFoundError:
+    s = {}
+except Exception:
+    print("· limit hook: " + path + " is not valid JSON; left alone")
+    sys.exit(1)
+hooks = s.get("hooks") if isinstance(s.get("hooks"), dict) else {}
+groups = hooks.get("StopFailure") if isinstance(hooks.get("StopFailure"), list) else []
+
+
+def mine(g):
+    return isinstance(g, dict) and any(isinstance(h, dict) and "ccp limit-hit" in (h.get("command") or "") for h in (g.get("hooks") or []))
+
+
+have = [g for g in groups if mine(g)]
+if what == "state":
+    print("on" if have else "off")
+    sys.exit(0)
+if what == "on":
+    want = {"matcher": "rate_limit", "hooks": [{"type": "command", "command": sys.argv[3]}]}
+    if have == [want]:
+        print("✓ limit hook: already in; a session that hits a usage limit makes ccp switch at once")
+        sys.exit(3)
+    groups = [g for g in groups if not mine(g)] + [want]
+    done = "✓ limit hook: a session that hits a usage limit makes ccp switch at once (sessions read settings.json again)"
+elif have:
+    groups = [g for g in groups if not mine(g)]
+    done = "✓ limit hook: removed"
+else:
+    print("✓ limit hook: already off")
+    sys.exit(3)
+if groups:
+    hooks["StopFailure"] = groups
+else:
+    hooks.pop("StopFailure", None)
+if hooks:
+    s["hooks"] = hooks
+else:
+    s.pop("hooks", None)
+tmp = path + ".ccp-tmp"
+with open(tmp, "w") as f:
+    json.dump(s, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+os.replace(tmp, path)
+print(done)
+PY
+}
+
+setup_hook() {   # setup_hook <ccp>: Claude Code's StopFailure hook (rate_limit) runs `ccp limit-hit`, unless ccp config hook off
+  local me="$1"
+  if [ "$(conf hook)" = off ]; then say "· limit hook: off, as you set it (ccp config hook on)"; return 3; fi
+  case "$me" in "$HOME"/.claude*/plugins/*) me=ccp ;; esac   # a plugin's copy moves with each update
+  hook_edit on "$me limit-hit"
+}
+
+cmd_statusline() {   # ccp statusline [on|off|status]: every account's limits under Claude Code's prompt, or not. The choice is
+                     # remembered (ccp config statusline), so ccp setup leaves the status line out once you turned it off
+  local st v rc
+  command -v python3 >/dev/null 2>&1 || die "statusline needs python3"
+  case "${1:-status}" in
+    on) set_conf statusline on; setup_statusline "$(self_path)"; rc=$? ;;
+    off) set_conf statusline off; statusline_edit off; rc=$?
+      say "ccp setup leaves it out from now on (ccp statusline on puts it back)" ;;
+    status)
+      st="$(statusline_edit state)" || { say "$st"; return 1; }
+      v="$(printf '%s\n' "$st" | cut -f2-)"
+      case "$st" in
+        on*) if [ -n "$v" ]; then v="redrawn every ${v}s"; else v="redrawn only when the conversation changes (ccp statusline on adds a timer)"; fi
+          say "status line: on, every account's limits under Claude Code's prompt, $v" ;;
+        off*) say "status line: off (ccp statusline on)" ;;
+        *) say "status line: yours ($v); ccp leaves it alone" ;;
+      esac
+      [ "$(conf statusline)" = on ] || say "ccp setup leaves it out: you turned it off"
+      return 0 ;;
+    *) die "usage: ccp statusline [on|off|status]" ;;
+  esac
+  # Claude Code watches its settings files and reloads them on change; a new statusLine command runs at once (its docs)
+  [ "$rc" = 0 ] && say "takes effect when Claude Code reads settings.json again: running sessions reload it on their own when it changes, new ones read it at start"
+  [ "$rc" != 1 ]
 }
 
 setup_plugin() {   # the Claude Code plugin: /ccp:switch, /ccp:usage
@@ -1431,21 +1702,8 @@ setup_undo() {   # ccp setup --undo: take out what setup put in (the plugin and 
     awk '/^# >>> ccp >>>/{skip=1} !skip{print} /^# <<< ccp <<</{skip=0}' "$rc" > "$rc.ccp-tmp" && mv "$rc.ccp-tmp" "$rc"
     say "✓ shell: removed from $rc"
   done
-  python3 - "$BASE/settings.json" <<'PY'
-import json, os, sys
-path = sys.argv[1]
-try:
-    s = json.load(open(path))
-except Exception:
-    sys.exit(0)
-if "ccp prompt" in (s.get("statusLine") or {}).get("command", ""):
-    del s["statusLine"]
-    with open(path + ".ccp-tmp", "w") as f:
-        json.dump(s, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-    os.replace(path + ".ccp-tmp", path)
-    print("✓ status line: removed")
-PY
+  local line; line="$(statusline_edit off)" && say "$line"   # only when there was one of ccp's to take out
+  local hk; hk="$(hook_edit off)" && say "$hk"
   [ -f "${CCP_AGENTS_DIR:-$HOME/Library/LaunchAgents}/$AGENT.plist" ] && cmd_service stop >/dev/null && say "✓ service: stopped"
   return 0
 }
@@ -1489,7 +1747,9 @@ import os, re, time, unicodedata
 
 ROWS = [dict(zip(("n", "id", "dir", "label"), l.split("\t"))) for l in os.environ.get("CCP_ROWS", "").splitlines() if l]
 THIS, KO, COLOR = os.environ.get("CCP_THIS", ""), os.environ.get("CCP_KO") == "1", not os.environ.get("NO_COLOR")
-W = {"this": "이 세션", "wait": "확인 중", "out": "로그인 필요"} if KO else {"this": "this session", "wait": "checking", "out": "signed out"}
+W = ({"this": "이 세션", "wait": "확인 중", "out": "로그인 필요", "expired": "갱신 필요", "busy": "조회 막힘"} if KO else
+     {"this": "this session", "wait": "checking", "out": "signed out", "expired": "needs renewal", "busy": "rate limited"})
+OLD = 120   # seconds: numbers older than this say how old they are
 NOW = time.time()
 SEEN = {}
 if os.environ.get("CCP_FRESH") == "1":
@@ -1497,7 +1757,7 @@ if os.environ.get("CCP_FRESH") == "1":
         for line in open(os.environ["CCP_SEEN"]):
             f = line.rstrip("\n").split("\t")
             if f[0]:
-                SEEN[f[0]] = (f[1] if len(f) > 1 else "", f[2] if len(f) > 2 else "")
+                SEEN[f[0]] = tuple((f[1:] + ["", "", "", ""])[:4])   # what a person reads, the numbers, when they were read, a note
     except OSError:
         pass
 
@@ -1533,7 +1793,7 @@ def left(ts):   # 5d2h, 4h49m, 9m
 
 def parse(i):   # {"5h": (used, resets), "wk": …, "m.Fable": …} as ccp watch last saw it
     out = {}
-    for tok in SEEN.get(i, ("", ""))[1].split():
+    for tok in SEEN.get(i, ("", "", "", ""))[1].split():
         key, used, ts = (tok.split(":") + ["0", "0"])[:3]
         try:
             out[key] = (float(used or 0), int(ts) if ts.isdigit() else 0)
@@ -1552,14 +1812,26 @@ kinds = [k for k in kinds if any(k in d for d in data.values())]   # one row per
 pad = max((len(label(k)) for k in kinds), default=4)
 
 
+def old_text(sec):   # 4m ago, 1h20m ago
+    m, h = int(sec) // 60 % 60, int(sec) // 3600
+    return (f"{h}시간 {m}분 전" if h else f"{m}분 전") if KO else (f"{h}h{m:02d}m ago" if h else f"{m}m ago")
+
+
 def column(row):
     n, i = row["n"], row["id"]
     name = f"#{n}" if i == "default" or i.startswith("acct-") else f"#{n} {i}"
-    lines = [paint("1;7", f" ▶ {name} {W['this']} ") if i == THIS else paint("1", name)]
-    d, text = data[i], SEEN.get(i, ("", ""))[0]
+    text, _, asof, note = SEEN.get(i, ("", "", "", ""))
+    expired = note == "expired" or text.startswith(("needs renewal", "sign-in expired"))
+    tags = ([old_text(NOW - int(asof))] if asof.isdigit() and NOW - int(asof) >= OLD else []) + ([W["expired"]] if expired and data[i] else [])
+    lines = [(paint("1;7", f" ▶ {name} {W['this']} ") if i == THIS else paint("1", name)) + (paint("2", " · " + " · ".join(tags)) if tags else "")]
+    d = data[i]
     if not d:
         if text == "not logged in":
             lines.append(paint("2", W["out"]))
+        elif expired:   # nothing was ever read, and it will not be until that account is opened once
+            lines += [paint("38;5;179", W["expired"]), paint("2", f"ccp run -p {n}")]
+        elif text.startswith(("asked too often", "offline", "usage unavailable")):
+            lines.append(paint("2", W["busy"]))
         elif SEEN or text:
             lines.append(paint("2", W["wait"]))
         return lines
@@ -1569,6 +1841,8 @@ def column(row):
             continue
         used, ts = d[k]
         lines.append([f"{label(k):<{pad}} {bar(used)} {paint(tone(used), f'{used:>3.0f}%')}", paint("38;5;245", left(ts) if ts else "")])
+    if expired:   # the numbers are the last ones read; this is how to get new ones
+        lines.append(paint("2", f"ccp run -p {n}"))
     return lines
 
 
@@ -1608,6 +1882,8 @@ usage() {
 ccp $VERSION — several Claude Code accounts on one computer, no logging in again
 
   ccp setup                     once per computer: shell, status line, Claude Code plugin, service   (--undo)
+  ccp statusline [on|off]       every account's limits under Claude Code's prompt, or not (on by default; ccp setup keeps
+                                your choice). Without on|off: whether it is on. Sessions take it when they read settings again
 
   ccp add [name] [-N]           new profile at the end, or at number N (the rest move down); signs in once
                                 [--isolated] [--no-login] [--email you@x.com] [--sso] [--console]
@@ -1623,8 +1899,10 @@ ccp $VERSION — several Claude Code accounts on one computer, no logging in aga
   ccp service start [--at 99]   in the background: when the account in use is full, ~/.claude takes the login of the
                                 next one with room; sessions stay where they are   (stop · status)
   ccp watch [--at 99]           the same in this terminal
-  ccp config [key value]        at <percent> (99) · respawn on|off (on) · continue on|off (on): when to switch, whether
-                                running sessions restart in place to take the new login, whether a cut-off one goes on
+  ccp config [key value]        at <percent> (99) · respawn on|off (on) · continue on|off (on) · statusline on|off (on) ·
+                                hook on|off (on): when to switch, whether running sessions restart in place to take the new
+                                login, whether a cut-off one goes on, whether the status line shows every account's limits,
+                                whether a session that hits a usage limit makes ccp switch at once (Claude Code's StopFailure hook)
   ccp env [n|name]              eval "\$(ccp env 2)": pin this shell to a profile
   ccp login <n|name>            sign a profile in again
   ccp rm <n|name> [--yes]       sign out and delete a profile
@@ -1651,6 +1929,8 @@ main() {
     run) cmd_run "$@" ;;
     sw|switch) cmd_sw "$@" ;;
     _respawn) cmd__respawn "$@" ;;
+    limit-hit) cmd_limit_hit ;;
+    _limit_hit) cmd__limit_hit ;;
     watch) cmd_watch "$@" ;;
     service) cmd_service "$@" ;;
     config) cmd_config "$@" ;;
@@ -1660,6 +1940,7 @@ main() {
     init) cmd_init "$@" ;;
     setup) cmd_setup "$@" ;;
     prompt) cmd_prompt "$@" ;;
+    statusline) cmd_statusline "$@" ;;
     -v|--version|version) say "ccp $VERSION" ;;
     -h|--help|help) usage ;;
     *) usage >&2; exit 2 ;;
