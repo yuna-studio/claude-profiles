@@ -11,7 +11,7 @@
 #
 # Works with bash 3.2 (stock macOS). https://github.com/yuna-studio/claude-profiles  ·  MIT
 set -u
-VERSION="0.7.1"
+VERSION="0.7.2"
 CCP_HOME="${CCP_HOME:-$HOME/.claude-profiles}"
 BASE="${CCP_BASE:-$HOME/.claude}"   # the default profile's folder: what other profiles share from
 TAB="$(printf '\t')"
@@ -993,7 +993,7 @@ EOF
         if [ -s "$CCP_HOME/seen" ]; then
           say "last check $(date -r "$CCP_HOME/seen" '+%H:%M:%S' 2>/dev/null || date -d "@$(stat -c %Y "$CCP_HOME/seen")" '+%H:%M:%S'):"
           while IFS="$TAB" read -r fid fname fused; do
-            case "$fname" in "needs renewal"*|"sign-in expired"*) ;; *) case "$fused" in *expired*) fname="$fname (needs renewal)" ;; esac ;; esac   # the numbers are the last ones read
+            case "$fname" in "needs renewal"*|"sign-in expired"*|"kept aside"*) ;; *) case "$fused" in *expired*) fname="$fname (needs renewal)" ;; *aside*) fname="$fname (kept aside)" ;; esac ;; esac   # the numbers are the last ones read
             [ -n "$fid" ] && exists "$fid" && say "  $(label "$fid"): $fname"
           done < "$CCP_HOME/seen"
         fi
@@ -1379,7 +1379,7 @@ def watch():
             return before.get(i) or prev[i]
         old = before.get(i, "").rstrip("\n").split("\t")
         if r["error"] and i in before and (transient(r) or r["error"].startswith(EXPIRED)):
-            note = "expired" if r["error"].startswith(EXPIRED) else ""   # the numbers stay, the status line says why they are old
+            note = "expired" if r["error"].startswith(EXPIRED) else "aside" if r["error"].startswith("kept aside") else ""   # the numbers stay, the status line says why they are old
             return "\t".join(old[0:3] + [old[3] if len(old) > 3 else ""] + ([note] if note else [])) + "\n"
         if r["error"] and r["error"].startswith(EXPIRED):
             return f"{i}\t{r['error']}\t\t\texpired\n"
@@ -1747,8 +1747,8 @@ import os, re, time, unicodedata
 
 ROWS = [dict(zip(("n", "id", "dir", "label"), l.split("\t"))) for l in os.environ.get("CCP_ROWS", "").splitlines() if l]
 THIS, KO, COLOR = os.environ.get("CCP_THIS", ""), os.environ.get("CCP_KO") == "1", not os.environ.get("NO_COLOR")
-W = ({"this": "이 세션", "wait": "확인 중", "out": "로그인 필요", "expired": "갱신 필요", "busy": "조회 막힘"} if KO else
-     {"this": "this session", "wait": "checking", "out": "signed out", "expired": "needs renewal", "busy": "rate limited"})
+W = ({"this": "이 세션", "wait": "확인 중", "out": "로그인 필요", "expired": "갱신 필요", "busy": "조회 막힘", "aside": "보관 중"} if KO else
+     {"this": "this session", "wait": "checking", "out": "signed out", "expired": "needs renewal", "busy": "rate limited", "aside": "kept aside"})
 OLD = 120   # seconds: numbers older than this say how old they are
 NOW = time.time()
 SEEN = {}
@@ -1822,12 +1822,16 @@ def column(row):
     name = f"#{n}" if i == "default" or i.startswith("acct-") else f"#{n} {i}"
     text, _, asof, note = SEEN.get(i, ("", "", "", ""))
     expired = note == "expired" or text.startswith(("needs renewal", "sign-in expired"))
-    tags = ([old_text(NOW - int(asof))] if asof.isdigit() and NOW - int(asof) >= OLD else []) + ([W["expired"]] if expired and data[i] else [])
+    aside = note == "aside" or text.startswith("kept aside")   # #1's own login waits while ~/.claude holds another's
+    tags = (([old_text(NOW - int(asof))] if asof.isdigit() and NOW - int(asof) >= OLD else []) + ([W["expired"]] if expired and data[i] else [])
+            + ([W["aside"]] if aside and data[i] else []))
     lines = [(paint("1;7", f" ▶ {name} {W['this']} ") if i == THIS else paint("1", name)) + (paint("2", " · " + " · ".join(tags)) if tags else "")]
     d = data[i]
     if not d:
         if text == "not logged in":
             lines.append(paint("2", W["out"]))
+        elif aside:   # its token ran out while it waited and nothing was read before: numbers come back with it (ccp use 1)
+            lines.append(paint("2", W["aside"]))
         elif expired:   # nothing was ever read, and it will not be until that account is opened once
             lines += [paint("38;5;179", W["expired"]), paint("2", f"ccp run -p {n}")]
         elif text.startswith(("asked too often", "offline", "usage unavailable")):
@@ -1859,7 +1863,10 @@ sep = paint("38;5;240", "│")
 out = []
 for k in range(max(len(c) for c in cols)):
     cells = [(c[k] if k < len(c) else "") for c in cols]
-    out.append(f"  {sep}  ".join(cell + " " * (w - width(cell)) for cell, w in zip(cells, widths)).rstrip())
+    line = f"  {sep}  ".join(cell + " " * (w - width(cell)) for cell, w in zip(cells, widths)).rstrip()
+    if line.startswith(" "):   # Claude Code drops the spaces a line starts with: a blank that is not a space keeps the columns
+        line = "\u2800" + line[1:]
+    out.append(line)
 print("\n".join(out), end="")
 PY
 

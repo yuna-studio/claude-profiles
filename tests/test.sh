@@ -216,6 +216,14 @@ ok "usage: with #3's login in ~/.claude each account still shows its own numbers
 ok "run: the folder stays ~/.claude, whichever login it holds" '[ "$(ccp run -- x)" = "CONFIG=unset ARGS=x" ] && [ "$(ccp run -p 3 -- x)" = "CONFIG=unset ARGS=x" ]'
 ok "watch: lists full accounts for running sessions" 'grep -q "^default	5-hour	91	" "$P/full"'
 ok "watch: keeps what it saw for ccp service status" 'grep -q "^default	5-hour 91%, week 48%	5h:91:[0-9]* wk:48:[0-9]* m.Fable:0:[0-9]*	[0-9]*$" "$P/seen" && grep -q "^acct-3	not logged in	$" "$P/seen" && has "$(ccp service status)" "  #1 default: 5-hour 91%, week 48%"'
+cp "$P/stash-default.json" "$T/stash1"
+python3 - "$P/stash-default.json" <<'EOF'   # #1's own token runs out while it waits aside
+import json, sys; d = json.load(open(sys.argv[1])); d["claudeAiOauth"]["expiresAt"] = 1000; json.dump(d, open(sys.argv[1], "w"))
+EOF
+ccp watch --once --at 95 >/dev/null
+ok "watch: #1's last numbers stay while its own login waits aside, and say so" 'grep -q "^default	5-hour 91%, week 48%	5h:91:[0-9]* wk:48:[0-9]* m.Fable:0:[0-9]*	[0-9]*	aside$" "$P/seen" && has "$(ccp service status)" "#1 default: 5-hour 91%, week 48% (kept aside)" && [ "$(cat "$P/slot")" = acct-4 ]'
+ok "status line: #1 kept aside shows its last numbers and says so" 'has "$(NO_COLOR=1 CCP_ACTIVE=default ccp prompt --usage)" "#1 · kept aside" && has "$(NO_COLOR=1 CCP_ACTIVE=default ccp prompt --usage)" " 91%"'
+cp "$T/stash1" "$P/stash-default.json"
 python3 - "$HOME/.claude/.credentials.json" <<'EOF'   # Claude Code renews #3's login while it is in ~/.claude
 import json, sys; d = json.load(open(sys.argv[1])); d["claudeAiOauth"]["refreshToken"] = "rt-3b"; json.dump(d, open(sys.argv[1], "w"))
 EOF
@@ -453,10 +461,16 @@ printf 'default\tweek 98%%\twk:98:%s m.Fable:0:%s\nacct-3\tnot logged in\t\nacct
   $((now + 4 * 86400 + 15 * 3600 + 90)) $((now + 4 * 86400 + 15 * 3600 + 90)) $((now + 4 * 3600 + 49 * 60 + 20)) $((now + 5 * 86400 + 21 * 3600 + 90)) > "$P/seen"
 out="$(NO_COLOR=1 CCP_ACTIVE=default ccp prompt --usage)"
 row() { printf '%s\n' "$out" | sed -n "$1p"; }
-ok "status line: a header row, this session's account stands out" 'has "$(row 1)" " ▶ #1 this session " && has "$(row 1)" "#3" && ! has "$out" "▶ #3" 2>/dev/null'
+ok "status line: a header row, this session's account stands out" 'has "$(row 1)" "▶ #1 this session " && has "$(row 1)" "#3" && ! has "$out" "▶ #3" 2>/dev/null'
 ok "status line: the same limit on the same row in every column, with time left" 'has "$(row 2)" "5h    ··········    -" && has "$(row 2)" "5h    ▎░░░░░░░░░   3%  4h49m" && has "$(row 3)" "week  █████████▊  98%  4d15h" && has "$(row 3)" "week  █▊░░░░░░░░  17%  5d21h" && has "$(row 4)" "Fable ░░░░░░░░░░   0%  4d15h"'
 ok "status line: an account without numbers says why, and how to get them (an older ccp wrote sign-in expired: still known)" 'has "$(row 2)" "signed out" && has "$(row 2)" "needs renewal" && has "$(row 3)" "ccp run -p 4"'
 ok "status line: in Korean" 'has "$(NO_COLOR=1 CCP_LANG=ko CCP_ACTIVE=acct-4 ccp prompt --usage)" "▶ #3 이 세션" && has "$(NO_COLOR=1 CCP_LANG=ko CCP_ACTIVE=acct-4 ccp prompt --usage)" "로그인 필요"'
+cp "$P/seen" "$T/seen.keep"
+printf 'default\tkept aside; numbers when it is back in use\t\nacct-4\tweek 46%%\twk:46:%s m.Fable:26:%s\t%s\n' $((now + 6 * 86400)) $((now + 6 * 86400)) "$now" > "$P/seen"
+out="$(NO_COLOR=1 CCP_LANG=ko CCP_ACTIVE=acct-4 ccp prompt --usage)"
+ok "status line: #1 kept aside with nothing read says so, never a check that does not end" 'has "$(row 2 | sed "s/│.*//")" "보관 중" && ! has "$(row 2 | sed "s/│.*//")" "확인 중" 2>/dev/null'
+ok "status line: a row whose first column is empty keeps its columns (Claude Code drops leading spaces)" 'case "$(row 3)" in "⠀ "*"│  Fable"*) true ;; *) false ;; esac && [ "$(printf "%s" "$(row 3)" | sed "s/│.*//" | wc -m)" = "$(printf "%s" "$(row 1)" | sed "s/│.*//" | wc -m)" ]'
+cp "$T/seen.keep" "$P/seen"; out="$(NO_COLOR=1 CCP_ACTIVE=default ccp prompt --usage)"
 mkdir -p "$T/two/acct-2" && echo isolated=0 > "$T/two/acct-2/.ccp" && printf 'default\nacct-2\n' > "$T/two/order"
 sed -n "1p;3p" "$P/seen" | sed "s/^acct-4/acct-2/" > "$T/two/seen"
 out="$(NO_COLOR=1 CCP_HOME="$T/two" CCP_ACTIVE=default ccp prompt --usage)"
