@@ -25,7 +25,9 @@ case "${1:-}" in   # background sessions: stop, --bg --resume, agents
   respawn) echo "respawn $2 CONFIG=${CLAUDE_CONFIG_DIR:-unset}" >> "$HOME/stub.log"
            [ -f "$cfg/respawn-$2.sh" ] && /bin/bash "$cfg/respawn-$2.sh"; exit 0 ;;   # a test's own: the same session, a new process
   daemon) echo "daemon ${*:2} CONFIG=${CLAUDE_CONFIG_DIR:-unset}" >> "$HOME/stub.log"
-          [ "${2:-}" = status ] && [ -f "$HOME/daemon-up" ] && echo "pid:     4242"; exit 0 ;;
+          dp="$(cat "$HOME/daemon-pid" 2>/dev/null || echo 4242)"
+          [ "${2:-}" = stop ] && [ ! -f "$HOME/daemon-stuck" ] && echo $((dp + 1)) > "$HOME/daemon-pid"   # it comes back as a new process
+          [ "${2:-}" = status ] && [ -f "$HOME/daemon-up" ] && echo "pid:     $dp"; exit 0 ;;
   agents) echo "agents CONFIG=${CLAUDE_CONFIG_DIR:-unset}" >> "$HOME/stub.log"
           [ -f "$cfg/stub-agents.json" ] && { cat "$cfg/stub-agents.json"; exit 0; }   # a test's own list (pid, cwd, kind)
           st='"status": "idle"'; case "${CLAUDE_CONFIG_DIR:-}" in *acct-6) st='"state": "failed"' ;; esac   # acct-6: comes up, then fails
@@ -43,7 +45,7 @@ if [ "${1:-}" = --stay ]; then   # a session that stays open, with the record Cl
 fi
 case "$1 ${2:-}" in
   "auth status")
-    if [ -f "$cfg/.stub-login" ]; then printf '{"loggedIn": true, "email": "%s@x.com", "subscriptionType": "max", "authMethod": "claude.ai"}\n' "$(basename "${CLAUDE_CONFIG_DIR:-default}")"
+    if [ -f "$cfg/.stub-login" ]; then printf '{"loggedIn": true, "email": "%s", "subscriptionType": "max", "authMethod": "claude.ai"}\n' "${STUB_EMAIL:-$(basename "${CLAUDE_CONFIG_DIR:-default}")@x.com}"
     else echo '{"loggedIn": false}'; exit 1; fi ;;
   "auth login") shift 2; echo "$*" > "$cfg/.stub-login" ;;
   "auth logout") rm -f "$cfg/.stub-login"; echo "logout ${CLAUDE_CONFIG_DIR:-default}" >> "$HOME/stub.log" ;;
@@ -151,14 +153,20 @@ import http.server, json, os, socketserver, sys
 FULL = {"five_hour": {"utilization": 100.0, "resets_at": "2099-01-01T00:00:00Z"}, "seven_day": {"utilization": 30.0, "resets_at": "2099-01-01T00:00:00Z"}}
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        open(sys.argv[1] + ".hits", "a").write("hit\n")   # every request, for the status line test
+        open(sys.argv[1] + (".phits" if self.path.endswith("/profile") else ".hits"), "a").write("hit\n")   # every request, for the status line test
         tok = self.headers.get("Authorization", "")
+        if self.path.endswith("/profile"):   # whose login a token is: ccp asks once for #1's address
+            body = {"Bearer tok-1": {"account": {"email": "me@x.com"}}, "Bearer tok-four": {"account": {"email": "four@x.com"}}}.get(tok)
+            if body is None or self.headers.get("anthropic-beta") != "oauth-2025-04-20":
+                self.send_response(401); self.end_headers(); return
+            self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(body).encode()); return
         body = {"Bearer tok-1": {"limits": [{"kind": "weekly_all", "percent": 48, "resets_at": "2099-01-01T00:00:00+00:00"},
                                             {"kind": "weekly_scoped", "percent": 0, "resets_at": "2099-01-01T00:00:00+00:00", "scope": {"model": {"display_name": "Fable"}}}],
                                  "five_hour": {"utilization": 91.0, "resets_at": "2099-01-01T00:00:00Z"}},
+                "Bearer tok-four": {"seven_day": {"utilization": 93.0, "resets_at": "2099-01-01T00:00:00Z"}},
                 "Bearer tok-3": {"seven_day": {"utilization": 12.0, "resets_at": "2099-01-01T00:00:00Z"}},
                 "Bearer tok-low": {"seven_day": {"utilization": 12.0, "resets_at": "2099-01-01T00:00:00Z"}},
-                "Bearer tok-full": FULL}.get(tok)
+                "Bearer tok-full": FULL, "Bearer tok-full2": FULL}.get(tok)
         if tok == "Bearer tok-flaky":   # asked too often the first time only, then the 5-hour limit is full
             first = not os.path.exists(sys.argv[1] + ".flaky")
             open(sys.argv[1] + ".flaky", "a").write("x")
@@ -184,7 +192,8 @@ SRV=$!
 i=0; while [ ! -s "$PORT_FILE" ] && [ "$i" -lt 100 ]; do sleep 0.2; i=$((i + 1)); done   # a cold python3 can take seconds
 [ -s "$PORT_FILE" ] || { echo "fake usage endpoint did not start:"; cat "$T/srv.log"; }
 CCP_USAGE_URL="http://127.0.0.1:$(cat "$PORT_FILE")/usage"
-export CCP_NO_KEYCHAIN=1 CCP_USAGE_URL
+CCP_PROFILE_URL="http://127.0.0.1:$(cat "$PORT_FILE")/profile"   # never Anthropic's own
+export CCP_NO_KEYCHAIN=1 CCP_USAGE_URL CCP_PROFILE_URL
 export no_proxy=127.0.0.1,localhost NO_PROXY=127.0.0.1,localhost   # macOS runners: urllib would follow the system proxy
 export CCP_IDLE_EVERY=0   # every round asks every account, as the older tests expect; the tests of the pauses set their own
 future=$(( ($(date +%s) + 86400) * 1000 ))
@@ -295,6 +304,76 @@ ccp use 1 >/dev/null; setcred tok-full
 CCP_ACTIVE=default ccp limit-hit; sleep 1
 ok "limit-hit: the other sessions that hit it in the same minute wait for that check" '[ ! -e "$P/slot" ]'
 rm -f "$P/hit" "$P/full" "$P/seen" "$P/asked"; setcred tok-1
+
+# a session's limit error while the account in use can be read: the numbers win (the session may hold an older token,
+# from the account ccp left or from when Claude Code's daemon started)
+rm -f "$P/benched"
+out="$(CCP_LIMIT_HIT=1 ccp watch --once --at 99)"
+ok "watch: a limit error while the numbers say there is room (91% of 99) moves nothing" '[ ! -e "$P/slot" ] && ! has "$out" "Claude Code now uses" 2>/dev/null'
+setcred tok-full
+out="$(ccp watch --once --at 99)"
+ok "watch: the full account it moves off is benched until that limit resets" 'has "$out" "Claude Code now uses #3 four@x.com" && grep -q "^default	[0-9]*$" "$P/benched"'
+ccp use 1 >/dev/null; setcred tok-1; rm -f "$P/benched" "$P/asked"
+ccp watch --once --at 99 >/dev/null   # a good round: the last numbers of every account
+cp "$P/acct-4/.credentials.json" "$T/cred4c"; cp "$P/acct-5/.credentials.json" "$T/cred5"
+echo "{\"claudeAiOauth\":{\"accessToken\":\"tok-busy\",\"refreshToken\":\"rt-3b\",\"expiresAt\":$future}}" > "$P/acct-4/.credentials.json"
+printf 'acct-4\t%s\n' "$(( $(date +%s) + 3600 ))" > "$P/benched"
+setcred tok-full
+out="$(ccp watch --once --at 99)"
+ok "watch: an account it moved off because it was full is not lent again while it cannot be asked (no flip-flop)" '! has "$out" "now uses #3" 2>/dev/null && has "$out" "Claude Code now uses #4"'
+ccp use 1 >/dev/null; rm -f "$P/benched" "$P/asked" "$P/stuck"; cp "$T/cred4c" "$P/acct-4/.credentials.json"
+echo "{\"claudeAiOauth\":{\"accessToken\":\"tok-full2\",\"refreshToken\":\"rt-5\",\"expiresAt\":$future}}" > "$P/acct-5/.credentials.json"
+setcred tok-1; ccp watch --once --at 99 >/dev/null   # #4 read full
+echo '{"claudeAiOauth":{"accessToken":"tok-old","refreshToken":"rt-5","expiresAt":1000}}' > "$P/acct-5/.credentials.json"   # then its token runs out
+echo "{\"claudeAiOauth\":{\"accessToken\":\"tok-busy\",\"refreshToken\":\"rt-3b\",\"expiresAt\":$future}}" > "$P/acct-4/.credentials.json"
+printf 'acct-4\t%s\n' "$(( $(date +%s) + 3600 ))" > "$P/benched"
+setcred tok-full
+out="$(ccp watch --once --at 99)"
+ok "watch: an expired sign-in whose last numbers were full is not lent (Claude Code would renew it into the same limit)" '! has "$out" "now uses #4" 2>/dev/null && has "$out" "Every account is full"'
+ccp use 1 >/dev/null; cp "$T/cred4c" "$P/acct-4/.credentials.json"; cp "$T/cred5" "$P/acct-5/.credentials.json"
+rm -f "$P/benched" "$P/asked" "$P/stuck" "$P/slot" "$P/moved"; setcred tok-1
+
+# #1's own address while its login is kept aside: Claude Code soon names the lent account in ~/.claude.json
+rm -f "$P/stash-email"; cp "$HOME/.claude.json.usage" "$HOME/.claude.json"
+ccp use 3 >/dev/null
+ok "use: #1's address is written down while its login is kept aside" '[ "$(cat "$P/stash-email")" = me@x.com ]'
+echo '{"oauthAccount":{"emailAddress":"four@x.com"}}' > "$HOME/.claude.json"
+ok "ls: the kept-aside row shows #1's own address, not the lent account's" 'ccp ls | grep -q "^  1 *me@x.com *kept aside"'
+rm -f "$P/stash-email"
+ok "usage: kept aside by an older ccp without its address: asked once, then written down" 'has "$(ccp usage)" "me@x.com" && [ "$(cat "$P/stash-email")" = me@x.com ]'
+ccp use 1 >/dev/null
+ok "use 1: the kept-aside address goes with the login it named" '[ ! -e "$P/stash-email" ]'
+ok "use 1: #1's address stays written down while ~/.claude.json still names the lent account" '[ "$(sed -n 1p "$P/back-email")" = me@x.com ] && [ "$(sed -n 2p "$P/back-email")" = four@x.com ]'
+had_login=0; [ -f "$HOME/.claude/.stub-login" ] && had_login=1; touch "$HOME/.claude/.stub-login"
+ok "ls after use 1: #1's row shows its own address, not the lent one ~/.claude.json still names" 'STUB_EMAIL=four@x.com ccp ls | grep -q "^. 1 *me@x.com "'
+ok "usage after use 1: #1's row shows its own address too" 'out="$(ccp usage)"; has "$out" "me@x.com" && [ -e "$P/back-email" ]'
+rm -f "$HOME/.claude/.stub-login"; ccp ls >/dev/null; touch "$HOME/.claude/.stub-login"
+ok "ls: a sign-in it cannot read does not drop what it wrote down" '[ -e "$P/back-email" ]'
+ok "ls: once Claude Code names #1 itself, the note is dropped" 'STUB_EMAIL=me@x.com ccp ls | grep -q "^. 1 *me@x.com " && [ ! -e "$P/back-email" ]'
+cp "$HOME/.claude.json.usage" "$HOME/.claude.json"; ccp use 3 >/dev/null
+echo '{"oauthAccount":{"emailAddress":"four@x.com"}}' > "$HOME/.claude.json"; ccp use 1 >/dev/null
+ok "use 1: the note is written again after the next lending" '[ -e "$P/back-email" ]'
+cp "$HOME/.claude.json.usage" "$HOME/.claude.json"
+ok "usage: once ~/.claude.json names #1 again, the note is dropped" 'has "$(ccp usage)" "me@x.com" && [ ! -e "$P/back-email" ]'
+[ "$had_login" = 1 ] || rm -f "$HOME/.claude/.stub-login"
+
+# the account Claude Code shows is a day-long cache in ~/.claude.json: a swap drops its date, nothing else
+echo '{"keep":1,"oauthAccount":{"emailAddress":"me@x.com","profileFetchedAt":123}}' > "$HOME/.claude.json"
+ccp use 3 >/dev/null
+ok "use: Claude Code reads its account again at its next start" '! grep -q profileFetchedAt "$HOME/.claude.json" && grep -q "\"keep\": 1" "$HOME/.claude.json" && grep -q me@x.com "$HOME/.claude.json" && [ ! -e "$HOME/.claude.json.lock" ]'
+ccp use 1 >/dev/null; cp "$HOME/.claude.json.usage" "$HOME/.claude.json"
+
+# a session still on #3 renewed its login into ~/.claude while that is #1's again: #3's numbers never show as #1's
+rm -f "$P/seen" "$P/asked" "$P/full" "$P/who" "$PORT_FILE.phits"
+setcred tok-1; ccp watch --once --at 99 >/dev/null
+ok "watch: #1's own login gives #1's numbers" 'grep -q "^default	.*wk:48:" "$P/seen"'
+setcred tok-four; out="$(ccp watch --once --at 99)"; out="$out$(ccp usage)"
+ok "watch: another account's login in #1's place: its numbers are not #1's, and it says so" 'grep -q "^default	holds #3.s login (four@x.com)" "$P/seen" && ! grep -q "^default.*wk:" "$P/seen" && has "$out" "holds #3"'
+ok "status line: it says another account's login" 'has "$(NO_COLOR=1 LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 CCP_ACTIVE=default ccp prompt --usage)" "another account"'
+ccp watch --once --at 99 >/dev/null
+ok "watch: whose a login is, is asked once per token" '[ "$(wc -l < "$PORT_FILE.phits" | tr -d " ")" = 2 ]'
+setcred tok-1
+rm -f "$P/full" "$P/seen" "$P/asked"
 unset CCP_RETRY_WAIT
 
 # an account not in use is asked every 5 minutes, not every minute; 'asked too often' puts only that account on a pause
@@ -322,6 +401,18 @@ setcred tok-full
 h5="$(hits)"; out="$(ccp watch --once --at 99)"; h6="$(hits)"
 ok "watch: about to hand over, the next account is asked ahead of its schedule" 'has "$out" "Claude Code now uses #3 four@x.com" && [ $((h6 - h5)) -ge 2 ]'
 ccp use 1 >/dev/null; setcred tok-1; rm -f "$P/asked" "$P/moved" "$P/stuck"
+
+# the account in use waits after 'asked too often' too (asking every round kept it blocked); a limit a session hit asks at once
+ccp watch --once --at 99 >/dev/null; setcred tok-busy
+out="$(ccp watch --once --at 99)"; h7="$(hits)"
+ok "watch: 'asked too often' puts the account in use on a pause, its numbers stay" 'has "$out" "asking about it again in 120s" && grep -q "^default	[0-9]*	120$" "$P/asked" && grep -q "^default	.*wk:48:" "$P/seen"'
+ccp watch --once --at 99 >/dev/null; h8="$(hits)"
+ok "watch: while it waits it is not asked" '[ "$h8" = "$h7" ] && grep -q "^default	[0-9]*	120$" "$P/asked"'
+CCP_LIMIT_HIT=1 ccp watch --once --at 99 >/dev/null; h9="$(hits)"
+ok "watch: a limit a session hit asks at once" '[ "$h9" -gt "$h8" ]'
+setcred tok-1; printf 'default\t0\t120\n' > "$P/asked"; ccp watch --once --at 99 >/dev/null
+ok "watch: an answer ends that pause too" 'grep -q "^default	[0-9]*	0$" "$P/asked"'
+rm -f "$P/asked" "$P/moved" "$P/stuck" "$P/hit" "$P/full"
 
 # a sign-in that expired keeps its last numbers, with the reason; the status line says how old they are and how to renew
 ccp watch --once --at 99 >/dev/null
@@ -385,6 +476,10 @@ ok "sw inside a background session: the login changes, the session runs on where
 ok "readopt: the daemon restarts with its sessions left running, and adopts them again" 'grep -q "^daemon stop --any --keep-workers CONFIG=unset$" "$HOME/stub.log" && grep -q "^agents CONFIG=unset$" "$HOME/stub.log" && has "$(cat "$HOME/stub-run.out")" "new background sessions start with it" && has "$(cat "$HOME/stub-run.out")" "restarts in place once this turn ends"'
 rm -f "$HOME/daemon-up" "$HOME/stub.log"; ccp use 1 >/dev/null
 ok "readopt: no daemon running, nothing to restart" '! grep -q "daemon stop" "$HOME/stub.log" 2>/dev/null'
+touch "$HOME/daemon-up" "$HOME/daemon-stuck"; rm -f "$HOME/stub.log"
+out="$(CCP_DAEMON_WAIT=1 CCP_NO_RESPAWN=1 ccp use 3 2>&1)"
+ok "readopt: a daemon that does not restart is named, with what to run" 'has "$out" "did not restart" && has "$out" "claude daemon stop --any --keep-workers" && [ "$(grep -c "^daemon stop" "$HOME/stub.log")" = 2 ]'
+rm -f "$HOME/daemon-up" "$HOME/daemon-stuck" "$HOME/stub.log"; ccp use 1 >/dev/null
 # running background sessions restart in place once idle, so they take the new login now
 rm -f "$HOME/stub.log"; rm -rf "$P/respawning"
 STUB_KIND=bg STUB_SID=cccc0000-4444 STUB_TICKS=60 "$CCP_CLAUDE" --stay > "$T/bg.out" 2>&1 &

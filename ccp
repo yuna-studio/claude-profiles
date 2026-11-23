@@ -11,7 +11,7 @@
 #
 # Works with bash 3.2 (stock macOS). https://github.com/yuna-studio/claude-profiles  ·  MIT
 set -u
-VERSION="0.7.2"
+VERSION="0.7.3"
 CCP_HOME="${CCP_HOME:-$HOME/.claude-profiles}"
 BASE="${CCP_BASE:-$HOME/.claude}"   # the default profile's folder: what other profiles share from
 TAB="$(printf '\t')"
@@ -235,6 +235,15 @@ cmd_login() {
   with_profile "$id" "$(real_claude)" auth login "$@"
 }
 
+back_email() {   # back_email "email<TAB>plan": #1's own address while ~/.claude.json still names the account it was lent
+  local f="$CCP_HOME/back-email" own lent
+  [ -s "$f" ] || { printf '%s\n' "$1"; return; }
+  own="$(sed -n 1p "$f")"; lent="$(sed -n 2p "$f")"
+  if [ -n "$own" ] && [ "${1%%$TAB*}" = "$lent" ]; then printf '%s\t%s\n' "$own" "${1#*$TAB}"; return; fi
+  [ "${1%%$TAB*}" = - ] || rm -f "$f"   # Claude Code has caught up (or #1 signed in elsewhere); not when it could not tell
+  printf '%s\n' "$1"
+}
+
 cmd_ls() {
   local cur id acc mark name i=0 iso p h
   h="$(holder)"; cur="$(resolve . | cut -f1)"; [ "$cur" = default ] && cur="$h"   # ~/.claude runs on the login it holds
@@ -242,9 +251,12 @@ cmd_ls() {
   for id in $(ids); do
     i=$((i + 1))
     if [ "$id" = default ] && [ "$h" != default ]; then   # its login is kept aside: auth status there shows the lent one
-      acc="$(python3 -c 'import json, os
-print((json.load(open(os.path.expanduser("~/.claude.json"))).get("oauthAccount") or {}).get("emailAddress") or "-")' 2>/dev/null || echo -)${TAB}kept aside"
-    else acc="$(account "$id")"; fi
+      acc="$(head -n 1 "$CCP_HOME/stash-email" 2>/dev/null)"   # ~/.claude.json names the lent account by now
+      acc="${acc:--}${TAB}kept aside"
+    else
+      acc="$(account "$id")"
+      [ "$id" = default ] && acc="$(back_email "$acc")"
+    fi
     mark=" "; [ "$id" = "$cur" ] && mark="*"
     name="$id"; iso=""
     grep -q '^isolated=1' "$(pdir "$id")/.ccp" 2>/dev/null && iso=" (isolated)"
@@ -296,17 +308,26 @@ EOF
 readopt() {   # Claude Code's daemon reads the login when it starts and gives it to the sessions it starts; `daemon stop
               # --keep-workers` restarts it and leaves the running sessions alone. A running session keeps the token it holds
               # until that runs out (hours at most), then reads ~/.claude again; `claude respawn <id>` restarts one in place now
-  local c n; c="$(real_claude 2>/dev/null)" || return 0
+  local c; c="$(real_claude 2>/dev/null)" || return 0
   (
     unset CLAUDE_CONFIG_DIR
-    "$c" daemon status 2>/dev/null | grep -q '^pid:' || exit 0
-    if ! "$c" daemon stop --any --keep-workers >/dev/null 2>&1; then say "background sessions take it when they next renew their sign-in"; exit 0; fi
-    "$c" agents --json >/dev/null 2>&1   # starts the daemon again (it comes up a few seconds later) and it adopts the sessions
-    n=0; until "$c" daemon status 2>/dev/null | grep -q '^pid:'; do
-      n=$((n + 1)); [ "$n" -lt "${CCP_DAEMON_WAIT:-45}" ] || { say "background sessions take it once Claude Code's daemon is back (claude agents starts it)"; exit 0; }
-      sleep 1; [ $((n % 10)) = 0 ] && "$c" agents --json >/dev/null 2>&1
+    dpid() { "$c" daemon status 2>/dev/null | sed -n 's/^pid:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1; }
+    old="$(dpid)"; [ -n "$old" ] || exit 0
+    new="$old"
+    for _ in 1 2; do   # the same pid afterwards: it did not restart and still hands out the login it read (once seen: stop said yes)
+      if ! "$c" daemon stop --any --keep-workers >/dev/null 2>&1; then say "background sessions take it when they next renew their sign-in"; exit 0; fi
+      "$c" agents --json >/dev/null 2>&1   # starts the daemon again (it comes up a few seconds later) and it adopts the sessions
+      n=0; new="$(dpid)"
+      while [ -z "$new" ] || [ "$new" = "$old" ]; do
+        n=$((n + 1)); [ "$n" -lt "${CCP_DAEMON_WAIT:-45}" ] || break
+        sleep 1; [ $((n % 10)) = 0 ] && "$c" agents --json >/dev/null 2>&1
+        new="$(dpid)"
+      done
+      [ -n "$new" ] && [ "$new" != "$old" ] && { say "new background sessions start with it"; exit 0; }
+      [ -z "$new" ] && { say "background sessions take it once Claude Code's daemon is back (claude agents starts it)"; exit 0; }
     done
-    say "new background sessions start with it"
+    say "Claude Code's daemon (pid $new) did not restart, so the background sessions it starts still get the old login;"
+    say "  run: claude daemon stop --any --keep-workers && claude agents"
   )
   return 0
 }
@@ -478,7 +499,7 @@ PY
 }
 
 IFS= read -r -d '' LOGIN_PY <<'PY' || true   # swap_login's keychain (or credentials file) work; tokens never reach a command line
-import hashlib, json, os, re, subprocess, sys, unicodedata
+import hashlib, json, os, re, subprocess, sys, time, unicodedata
 
 HOME_DIR, BASE = os.environ["CCP_HOME_DIR"], os.environ["CCP_BASE_DIR"]
 ROWS = [dict(zip(("n", "id", "dir", "label"), l.split("\t"))) for l in os.environ.get("CCP_ROWS", "").splitlines() if l]
@@ -574,6 +595,76 @@ def oauth(o):
     return (o or {}).get("claudeAiOauth") or {}
 
 
+def home_email():
+    try:
+        with open(os.path.expanduser("~/.claude.json")) as f:
+            return (json.load(f).get("oauthAccount") or {}).get("emailAddress") or ""
+    except Exception:
+        return ""
+
+
+def rm(p):
+    try:
+        os.remove(p)
+    except FileNotFoundError:
+        pass
+
+
+def stash_email(keep):   # #1's address while its login is kept aside: Claude Code soon writes the lent account's into ~/.claude.json
+    p = os.path.join(HOME_DIR, "stash-email")
+    back = os.path.join(HOME_DIR, "back-email")
+    if not keep:   # #1's login is back, but ~/.claude.json names the lent account until Claude Code rewrites it: keep both
+        try:
+            with open(p) as f:
+                e = f.readline().strip()
+        except Exception:
+            e = ""
+        rm(p)
+        if e:
+            with open(back, "w") as f:
+                f.write(e + "\n" + home_email() + "\n")
+        else:
+            rm(back)
+        return
+    rm(back)
+    e = home_email()
+    if e:
+        with open(p, "w") as f:
+            f.write(e + "\n")
+
+
+def forget_profile():   # Claude Code keeps the account it shows (~/.claude.json) for a day: let its next start read it again
+    p = os.path.realpath(os.path.expanduser("~/.claude.json"))
+    lock = p + ".lock"   # Claude Code's own
+    for _ in range(30):
+        try:
+            os.mkdir(lock)
+            break
+        except FileExistsError:
+            time.sleep(0.1)
+        except OSError:
+            return
+    else:
+        return   # busy: it stays for a day at most, as before
+    try:
+        with open(p) as f:
+            d = json.load(f)
+        if not isinstance(d.get("oauthAccount"), dict) or d["oauthAccount"].pop("profileFetchedAt", None) is None:
+            return
+        tmp = p + f".ccp.{os.getpid()}"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, os.stat(p).st_mode & 0o777)
+        with os.fdopen(fd, "w") as f:
+            json.dump(d, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, p)
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            os.rmdir(lock)
+        except OSError:
+            pass
+
+
 def same(a, b):   # one login: a token in common, or the same account
     return any(a.get(k) and a.get(k) == b.get(k) for k in ("accessToken", "refreshToken", "accountUuid"))
 
@@ -606,6 +697,7 @@ if held == "default":
         stop(f"#1's own sign-in is already kept aside ({where(STASH)}), yet ~/.claude does not hold another account's; "
              "ccp changes nothing so that neither is lost")
     save(STASH, slot)
+    stash_email(True)
 else:
     h = load(held) or {}
     h["claudeAiOauth"] = oauth(slot)
@@ -617,10 +709,12 @@ if to == "default":
     slot["claudeAiOauth"] = oauth(s)   # only the Claude login: MCP sign-ins in ~/.claude stay as they are
     save("default", slot)
     drop(STASH)
+    stash_email(False)
 else:
     slot["claudeAiOauth"] = oauth(t)
     save("default", slot)
     lend(to)
+forget_profile()
 print(f"{to}\t1")
 PY
 
@@ -1067,6 +1161,7 @@ IFS= read -r -d '' USAGE_PY <<'PY' || true   # read, not $(cat <<…): bash 3.2 
 import datetime, hashlib, json, os, re, select, shutil, subprocess, sys, time, unicodedata, urllib.error, urllib.request
 
 URL = os.environ.get("CCP_USAGE_URL", "https://api.anthropic.com/api/oauth/usage")
+PROFILE_URL = os.environ.get("CCP_PROFILE_URL", "https://api.anthropic.com/api/oauth/profile")
 BASE = os.environ.get("CCP_BASE_DIR") or os.path.expanduser("~/.claude")
 MODE, EVERY = sys.argv[1], int(sys.argv[2])
 ROWS = [dict(zip(("n", "id", "dir", "label"), l.split("\t"))) for l in os.environ.get("CCP_ROWS", "").splitlines() if l]
@@ -1140,6 +1235,55 @@ def email(d):
         return "-"
 
 
+def own_email(d):
+    """email(d), but #1's own address while ~/.claude.json still names the account it was lent."""
+    e = email(d)
+    p = os.path.join(os.environ.get("CCP_HOME_DIR") or "", "back-email")
+    try:
+        with open(p) as f:
+            own, lent = (f.read().split("\n") + ["", ""])[:2]
+    except Exception:
+        return e
+    if own and e == lent:
+        return own
+    try:
+        os.remove(p)
+    except Exception:
+        pass
+    return e
+
+
+def kept_email():
+    """#1's address while its login is kept aside: ~/.claude.json names the lent account by then."""
+    p = os.path.join(os.environ.get("CCP_HOME_DIR") or "", "stash-email")
+    try:
+        with open(p) as f:
+            e = f.readline().strip()
+        if e:
+            return e
+    except Exception:
+        pass
+    c = stash() or {}   # kept aside by an older ccp, which did not write it down: ask Anthropic whose login it is, once
+    if not c.get("accessToken") or (c.get("expiresAt") or 0) / 1000 < time.time():
+        return "-"
+    req = urllib.request.Request(PROFILE_URL, headers={"Authorization": "Bearer " + c["accessToken"], "anthropic-beta": "oauth-2025-04-20",
+                                                       "User-Agent": "ccp/" + os.environ.get("CCP_VERSION", "")})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as f:
+            a = json.load(f).get("account") or {}
+        e = a.get("email") or a.get("email_address") or ""
+    except Exception:
+        return "-"
+    if not e:
+        return "-"
+    try:
+        with open(p, "w") as f:
+            f.write(e + "\n")
+    except Exception:
+        pass
+    return e
+
+
 def plan(c):
     p = (c or {}).get("subscriptionType") or "-"
     m = re.search(r"(\d+x)", (c or {}).get("rateLimitTier") or "")
@@ -1171,10 +1315,49 @@ def limits(u):
     return sorted(out, key=lambda x: order.get(x["name"], 2))
 
 
+def who(c):
+    """The address a login belongs to, asked of Anthropic once per token and written down; "" when it cannot be told now."""
+    home, at = os.environ.get("CCP_HOME_DIR") or "", c.get("accessToken") or ""
+    if not home or not at:
+        return ""
+    fp, p, known = hashlib.sha256(at.encode()).hexdigest()[:16], os.path.join(home, "who"), []
+    try:
+        with open(p) as f:
+            known = [k for k in (l.rstrip("\n").split("\t") for l in f) if len(k) == 3 and k[2].isdigit()]
+    except Exception:
+        pass
+    for k in known:
+        if k[0] == fp and (k[1] or time.time() - int(k[2]) < 600):   # no answer: not again for 10 minutes
+            return k[1]
+    req = urllib.request.Request(PROFILE_URL, headers={"Authorization": "Bearer " + at, "anthropic-beta": "oauth-2025-04-20",
+                                                       "User-Agent": "ccp/" + os.environ.get("CCP_VERSION", "")})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as f:
+            a = json.load(f).get("account") or {}
+        e = a.get("email") or a.get("email_address") or ""
+    except Exception:
+        e = ""
+    try:
+        tmp = p + f".{os.getpid()}"
+        with open(tmp, "w") as f:
+            f.writelines("\t".join(k) + "\n" for k in [k for k in known if k[0] != fp][-19:] + [[fp, e, str(int(time.time()))]])
+        os.replace(tmp, p)
+    except Exception:
+        pass
+    return e
+
+
+def mail(row):   # the address a row goes by
+    if row["id"] != "default":
+        return email(row["dir"])
+    return kept_email() if SLOT != "default" else own_email(row["dir"])
+
+
 def fetch(row, ask=True):
     c = creds(row)
     aside = SLOT != "default" and row["id"] == "default"
-    r = {"n": int(row["n"]), "id": row["id"], "label": row["label"], "email": email(row["dir"]), "plan": plan(c), "limits": [], "error": None,
+    r = {"n": int(row["n"]), "id": row["id"], "label": row["label"], "email": kept_email() if aside else (own_email(row["dir"]) if row["id"] == "default" else email(row["dir"])), "plan": plan(c),
+         "limits": [], "error": None,
          "lendable": bool((c or {}).get("refreshToken"))}   # its login can go in ~/.claude (or come back there)
     if not c or not c.get("accessToken"):
         r["error"] = "not logged in"
@@ -1185,6 +1368,14 @@ def fetch(row, ask=True):
     if not ask:   # not asked this round: ccp watch uses its last good numbers
         r["cached"] = True
         return r
+    if row["id"] == SLOT:   # the login in ~/.claude: a session still on another account may have renewed that account's login into it
+        e = who(c)
+        other = next((x for x in ROWS if x["id"] != row["id"] and mail(x).lower() == e.lower()), None) if e else None
+        if other:   # its numbers would be the other account's
+            r["error"] = f"holds #{other['n']}'s login ({e}); sign in again: ccp login {row['n']}"
+            return r
+        if e and row["id"] == "default":   # ~/.claude.json may name an earlier account for a day
+            r["email"] = e
     req = urllib.request.Request(URL, headers={"Authorization": "Bearer " + c["accessToken"], "anthropic-beta": "oauth-2025-04-20",
                                                "User-Agent": "ccp/" + os.environ.get("CCP_VERSION", "")})
     try:
@@ -1345,7 +1536,11 @@ def watch():
             pass
 
     in_use = SLOT if any(r["id"] == SLOT for r in ROWS) else "default"
-    by = {in_use: fetch_retry(next(r for r in ROWS if r["id"] == in_use))}   # every round: it is the one that switches
+    cur_row = next(r for r in ROWS if r["id"] == in_use)
+    rest = IDLE_EVERY > 0 and not HIT and asked.get(in_use, (0.0, 0))[1] > 0 and now < asked[in_use][0]   # asking again at once keeps it blocked
+    by = {in_use: fetch(cur_row, ask=False) if rest else fetch_retry(cur_row)}   # every round: it is the one that switches
+    if by[in_use].pop("cached", False):   # as if it had just said so again
+        by[in_use]["error"] = "asked too often; next refresh"
     urgent = HIT or blocking(by[in_use]) is not None   # about to hand over: the account it hands over to needs today's numbers
 
     def may_ask(i):   # an account not in use is asked every IDLE_EVERY seconds, or after the pause 'asked too often' set
@@ -1371,7 +1566,7 @@ def watch():
     write("full", "".join(f"{i}\t{l['name']}\t{l['used']:.0f}\t{int(l['resets'] or 0)}\n" for i, l in full.items()))
 
     def transient(r):
-        return r["error"] and not r["error"].startswith(("not logged in",) + EXPIRED)
+        return r["error"] and not r["error"].startswith(("not logged in", "holds #") + EXPIRED)
 
     def seen(r):   # id, what a person reads (ccp service status), name:used:resets for the status line, when it was read, a note
         i = r["id"]
@@ -1399,16 +1594,28 @@ def watch():
 
     for r in results:   # an account not in use that says 'asked too often' waits twice as long each time, up to 10 min; the others go on
         i, err = r["id"], r["error"] or ""
-        if i == in_use or r.get("cached"):
+        if r.get("cached") or (i == in_use and rest):
+            continue
+        if i == in_use and not err.startswith("asked too often"):   # asked every round, unless it was told to wait
+            asked[i] = (now, 0)
             continue
         if err.startswith(("asked too often", "usage unavailable", "offline")):
-            pause = min(600, max(asked.get(i, (0.0, 0))[1], 60) * 2)
+            pause = min(300 if i == in_use else 600, max(asked.get(i, (0.0, 0))[1], 60) * 2)
             why = "the usage endpoint says asked too often" if err.startswith("asked") else err
             print(time.strftime("%Y-%m-%d %H:%M:%S ") + f"{name(i)}: {why}; asking about it again in {pause}s", flush=True)
         else:
             pause = 0
         asked[i] = (now + (pause or IDLE_EVERY), pause)
     write("asked", "".join(f"{i}\t{int(nxt)}\t{p}\n" for i, (nxt, p) in asked.items() if i in by))
+
+    bench = {}   # an account ccp moved off because it was full: while it cannot be asked, not lent again before that limit resets
+    for line in read("benched").splitlines():
+        f = line.split("\t")
+        try:
+            if f[0] in by and float(f[1]) > now:
+                bench[f[0]] = float(f[1])
+        except (IndexError, ValueError):
+            pass
 
     def frees(l):
         return f", free in {ago(l['resets'] - time.time())}" if l["resets"] else ""
@@ -1437,9 +1644,11 @@ def watch():
         if r["id"] in full or not r["lendable"]:
             return False
         if not r["error"]:
-            return True
+            return True   # fresh numbers under the limit: it freed up, benched or not
+        if r["id"] in bench:
+            return False   # moved off it because it was full, and nothing says that has changed
         if r["error"].startswith(EXPIRED):
-            return unknown_ok   # Claude Code renews it when it starts
+            return unknown_ok and last_room(r["id"])   # Claude Code renews it when it starts; not when it was full when last read
         return unknown_ok and transient(r) and last_room(r["id"])
 
     def tell(msg):
@@ -1459,21 +1668,18 @@ def watch():
         write("want", i + "\n")
 
     cur = SLOT if SLOT in by else "default"
-    if HIT and cur not in full:   # a session just hit a limit: believe it, unless the numbers say it was only a burst
-        r = by[cur]
-        if r["error"]:   # cannot be asked: the limit error is the evidence, unless its last numbers were low (a session still on the
-            lu = last_used(cur)   # token of the account ccp just left says nothing about this one)
-            l = {"name": "5-hour", "used": 100.0, "resets": None} if lu is None or lu >= 80 else None
-        else:
-            l = blocking(r, min(at, 90))
-        if l:
-            full[cur] = l
+    if HIT and cur not in full and by[cur]["error"]:   # a session just hit a limit. Numbers that say the account in use has room
+        lu = last_used(cur)   # win: the session may still hold an older token (the account ccp left, or the one Claude Code's daemon
+        if lu is None or lu >= min(at, 95):   # read when it started). It cannot be asked now: the limit error is the evidence,
+            full[cur] = {"name": "5-hour", "used": 100.0, "resets": None}   # unless its last numbers were low
     moved, _, mfree = read("moved").partition("\t")   # the account it first switched from, and when that one frees up
     if cur in full:
         l = full[cur]
         to = next((r["id"] for r in results if r["id"] != cur and room(r, True)), None)
         if to:
             use(to)
+            bench[cur] = l["resets"] or now + 3600   # not back on it before it frees up, even when a read then fails
+            write("benched", "".join(f"{i}\t{int(u)}\n" for i, u in bench.items()))
             if to == moved:   # back on the account it first switched from
                 remove("moved")
             elif moved not in by:   # remember the first one, to go back to it
@@ -1747,8 +1953,8 @@ import os, re, time, unicodedata
 
 ROWS = [dict(zip(("n", "id", "dir", "label"), l.split("\t"))) for l in os.environ.get("CCP_ROWS", "").splitlines() if l]
 THIS, KO, COLOR = os.environ.get("CCP_THIS", ""), os.environ.get("CCP_KO") == "1", not os.environ.get("NO_COLOR")
-W = ({"this": "이 세션", "wait": "확인 중", "out": "로그인 필요", "expired": "갱신 필요", "busy": "조회 막힘", "aside": "보관 중"} if KO else
-     {"this": "this session", "wait": "checking", "out": "signed out", "expired": "needs renewal", "busy": "rate limited", "aside": "kept aside"})
+W = ({"this": "이 세션", "wait": "확인 중", "out": "로그인 필요", "expired": "갱신 필요", "busy": "조회 막힘", "aside": "보관 중", "mixed": "다른 계정 로그인"} if KO else
+     {"this": "this session", "wait": "checking", "out": "signed out", "expired": "needs renewal", "busy": "rate limited", "aside": "kept aside", "mixed": "another account's login"})
 OLD = 120   # seconds: numbers older than this say how old they are
 NOW = time.time()
 SEEN = {}
@@ -1830,6 +2036,8 @@ def column(row):
     if not d:
         if text == "not logged in":
             lines.append(paint("2", W["out"]))
+        elif text.startswith("holds #"):   # its numbers would be the other account's
+            lines.append(paint("38;5;179", W["mixed"]))
         elif aside:   # its token ran out while it waited and nothing was read before: numbers come back with it (ccp use 1)
             lines.append(paint("2", W["aside"]))
         elif expired:   # nothing was ever read, and it will not be until that account is opened once
