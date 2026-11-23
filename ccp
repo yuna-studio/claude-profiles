@@ -11,7 +11,7 @@
 #
 # Works with bash 3.2 (stock macOS). https://github.com/yuna-studio/claude-profiles  ·  MIT
 set -u
-VERSION="0.7.3"
+VERSION="0.7.4"
 CCP_HOME="${CCP_HOME:-$HOME/.claude-profiles}"
 BASE="${CCP_BASE:-$HOME/.claude}"   # the default profile's folder: what other profiles share from
 TAB="$(printf '\t')"
@@ -982,7 +982,7 @@ cmd_watch() {   # ccp watch [--at PERCENT] [--every SECONDS] [--once]: what `ccp
   while :; do
     now_at="${at:-$(conf at)}"   # ccp config at takes effect on the next check
     CCP_ROWS="$(usage_rows)" CCP_BASE_DIR="$BASE" CCP_VERSION="$VERSION" CCP_HOME_DIR="$CCP_HOME" CCP_AT="$now_at" CCP_SLOT="$(holder)" \
-      python3 -c "$USAGE_PY" watch "$every"
+      python3 -c "$LIVE_PY$USAGE_PY" watch "$every"
     if [ -s "$CCP_HOME/want" ]; then   # the check picked another account: its login goes in ~/.claude
       w="$(cat "$CCP_HOME/want")"; rm -f "$CCP_HOME/want"
       exists "$w" && swap_login "$w"
@@ -1151,12 +1151,42 @@ cmd_usage() {   # ccp usage [--json] · ccp top [--every SECONDS]
   local here; here="$(ref "${CCP_ACTIVE:-$(resolve . | cut -f1)}" 2>/dev/null)" || here=""
   [ "$here" = default ] && here="$(holder)"   # ~/.claude runs on the login it holds
   CCP_ROWS="$(usage_rows)" CCP_BASE_DIR="$BASE" CCP_VERSION="$VERSION" CCP_HERE="$here" CCP_HOME_DIR="$CCP_HOME" CCP_SLOT="$(holder)" \
-    python3 -c "$USAGE_PY" "$mode" "$every"
+    python3 -c "$LIVE_PY$USAGE_PY" "$mode" "$every"
 }
 
 # The usage view. Each account's sign-in token is read (macOS keychain item or .credentials.json, the same places
 # Claude Code keeps it) only to ask Anthropic for that account's usage, the request Claude Code's /usage makes. It is
 # never printed, stored or put on a command line.
+IFS= read -r -d '' LIVE_PY <<'PY' || true
+def live_read(p):   # {account: (its limits, when)} as Claude Code gave them to its status line: no query, so never 'asked too often'
+    out = {}
+    try:
+        with open(p) as f:
+            for line in f:
+                c = line.rstrip("\n").split("\t")
+                if len(c) == 3 and c[2].isdigit():
+                    out[c[0]] = (c[1], int(c[2]))
+    except OSError:
+        pass
+    return out
+
+
+def live_merge(keys, live):   # "5h:used:resets wk:…" with newer ones laid over: the later window wins, in one window the higher (use only grows)
+    have = {}
+    for tok in keys.split() + live.split():
+        k, used, ts = (tok.split(":") + ["0", "0"])[:3]
+        try:
+            u, t = float(used or 0), int(ts or 0)
+        except ValueError:
+            continue
+        o = have.get(k)
+        if o is None or t > o[1] + 300 or (abs(t - o[1]) <= 300 and u > o[0]):
+            have[k] = (u, t)
+    return " ".join(f"{k}:{u:.0f}:{t}" for k, (u, t) in have.items())
+
+
+PY
+
 IFS= read -r -d '' USAGE_PY <<'PY' || true   # read, not $(cat <<…): bash 3.2 misparses quotes in a heredoc inside $()
 import datetime, hashlib, json, os, re, select, shutil, subprocess, sys, time, unicodedata, urllib.error, urllib.request
 
@@ -1383,6 +1413,10 @@ def fetch(row, ask=True):
             r["limits"] = limits(json.load(f))
     except urllib.error.HTTPError as e:
         r["error"] = {401: f"needs renewal: open #{row['n']} once (ccp run -p {row['n']})", 429: "asked too often; next refresh"}.get(e.code, f"usage unavailable (HTTP {e.code})")
+        ra = (e.headers.get("Retry-After") if e.headers else None) or ""
+        if e.code == 429 and ra.isdigit():   # until then it answers nothing: asking again is for nothing
+            r["wait"] = min(int(ra), 3600)
+            r["error"] = f"asked too often; again in {ago(r['wait'])}"
     except Exception:
         r["error"] = "offline or usage unavailable"
     return r
@@ -1400,7 +1434,7 @@ def fetch_retry(row, tries=2):
     """The account in use is the one that matters: a passing 'asked too often' must not hide that it is full."""
     r = fetch(row)
     for _ in range(tries - 1):
-        if not (r["error"] or "").startswith(("asked too often", "usage unavailable", "offline")):
+        if not (r["error"] or "").startswith(("asked too often", "usage unavailable", "offline")) or r.get("wait", 0) > RETRY_WAIT:
             break
         time.sleep(RETRY_WAIT)
         r = fetch(row)
@@ -1518,7 +1552,7 @@ def watch():
 
     def blocking(r, level=None):   # the 5-hour or week limit that stops this account, the one that frees up last
         lv = at if level is None else level
-        hit = [l for l in r["limits"] if l["name"] in ("5-hour", "week") and l["used"] >= lv] if not r["error"] else []
+        hit = [l for l in (r.get("live") or [] if r["error"] else r["limits"]) if l["name"] in ("5-hour", "week") and l["used"] >= lv]
         return max(hit, key=lambda l: l["resets"] or 0) if hit else None
 
     before, prev = {}, {}   # the last line per account that had numbers (a passing hiccup keeps them), and the last line at all
@@ -1527,6 +1561,14 @@ def watch():
         prev[f[0]] = line + "\n"
         if len(f) >= 3 and f[2]:
             before[f[0]] = line + "\n"
+    newer = set()   # accounts whose numbers Claude Code's status line gave after the last read here
+    for i, (keys, at_) in live_read(path("live")).items():
+        f = (prev.get(i, i).rstrip("\n").split("\t") + ["", "", "", ""])[:4]
+        if at_ > (int(f[3]) if f[3].isdigit() else 0):
+            newer.add(i)
+            keys = live_merge(f[2], keys)
+            text = ", ".join(f"{l['name']} {l['used']:.0f}%" for l in cached_limits(f"{i}\t\t{keys}") if l["name"] in ("5-hour", "week"))
+            before[i] = f"{i}\t{text}\t{keys}\t{at_}\n"
     asked = {}   # per account not in use: when to ask again, and the pause 'asked too often' set (0 when it answered)
     for line in read("asked").splitlines():
         f = line.split("\t")
@@ -1540,7 +1582,9 @@ def watch():
     rest = IDLE_EVERY > 0 and not HIT and asked.get(in_use, (0.0, 0))[1] > 0 and now < asked[in_use][0]   # asking again at once keeps it blocked
     by = {in_use: fetch(cur_row, ask=False) if rest else fetch_retry(cur_row)}   # every round: it is the one that switches
     if by[in_use].pop("cached", False):   # as if it had just said so again
-        by[in_use]["error"] = "asked too often; next refresh"
+        by[in_use]["error"] = f"asked too often; again in {ago(asked[in_use][0] - now)}"
+    if in_use in newer and (by[in_use]["error"] or "").startswith(("asked too often", "usage unavailable", "offline")):
+        by[in_use]["live"] = cached_limits(before[in_use])   # what Claude Code itself was told: enough to see that it is full
     urgent = HIT or blocking(by[in_use]) is not None   # about to hand over: the account it hands over to needs today's numbers
 
     def may_ask(i):   # an account not in use is asked every IDLE_EVERY seconds, or after the pause 'asked too often' set
@@ -1600,7 +1644,7 @@ def watch():
             asked[i] = (now, 0)
             continue
         if err.startswith(("asked too often", "usage unavailable", "offline")):
-            pause = min(300 if i == in_use else 600, max(asked.get(i, (0.0, 0))[1], 60) * 2)
+            pause = max(min(300 if i == in_use else 600, max(asked.get(i, (0.0, 0))[1], 60) * 2), r.get("wait", 0))
             why = "the usage endpoint says asked too often" if err.startswith("asked") else err
             print(time.strftime("%Y-%m-%d %H:%M:%S ") + f"{name(i)}: {why}; asking about it again in {pause}s", flush=True)
         else:
@@ -1945,11 +1989,11 @@ status_line() {   # status_line <id of this session>: a column per account, a ro
   local fresh=0 ko=0
   [ -n "$(find "$CCP_HOME/seen" -mmin -15 2>/dev/null)" ] && fresh=1
   case "${CCP_LANG:-${LC_ALL:-${LANG:-}}}" in ko*) ko=1 ;; esac
-  CCP_ROWS="$(usage_rows)" CCP_THIS="${1:-}" CCP_FRESH="$fresh" CCP_SEEN="$CCP_HOME/seen" CCP_KO="$ko" python3 -c "$STATUS_PY"
+  CCP_ROWS="$(usage_rows </dev/null)" CCP_THIS="${1:-}" CCP_FRESH="$fresh" CCP_SEEN="$CCP_HOME/seen" CCP_KO="$ko" python3 -c "$LIVE_PY$STATUS_PY"
 }
 
 IFS= read -r -d '' STATUS_PY <<'PY' || true
-import os, re, time, unicodedata
+import json, os, re, select, sys, time, unicodedata
 
 ROWS = [dict(zip(("n", "id", "dir", "label"), l.split("\t"))) for l in os.environ.get("CCP_ROWS", "").splitlines() if l]
 THIS, KO, COLOR = os.environ.get("CCP_THIS", ""), os.environ.get("CCP_KO") == "1", not os.environ.get("NO_COLOR")
@@ -1966,6 +2010,73 @@ if os.environ.get("CCP_FRESH") == "1":
                 SEEN[f[0]] = tuple((f[1:] + ["", "", "", ""])[:4])   # what a person reads, the numbers, when they were read, a note
     except OSError:
         pass
+LIVE_AT = os.path.join(os.path.dirname(os.environ["CCP_SEEN"]), "live")
+LIVE = live_read(LIVE_AT)
+IDS = [r["id"] for r in ROWS]
+
+
+def given():   # what Claude Code writes to its status line: this session's own 5-hour and week limits, and when it last worked
+    buf, end = b"", time.time() + 0.5
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return "", 0
+        while time.time() < end:
+            if select.select([0], [], [], 0.1)[0]:
+                part = os.read(0, 65536)
+                if not part:
+                    break
+                buf += part
+        d = json.loads(buf.decode())
+        rl = d.get("rate_limits") or {}
+        keys = [f"{k}:{float(rl[n]['used_percentage']):.0f}:{int(rl[n]['resets_at'])}" for k, n in (("5h", "five_hour"), ("wk", "seven_day")) if rl.get(n)]
+        return " ".join(keys), int(os.stat(d["transcript_path"]).st_mtime) if keys else 0
+    except Exception:
+        return "", 0
+
+
+def last(i):   # its limits as last known, and when: what ccp watch read, with a newer status line's laid over
+    _, keys, asof, _ = SEEN.get(i, ("", "", "", ""))
+    at = int(asof) if asof.isdigit() else 0
+    lk, lat = LIVE.get(i, ("", 0))
+    return (live_merge(keys, lk), lat) if lat > at else (keys, at)
+
+
+def week(keys):   # when its week resets: what tells one account's numbers from another's
+    return next((int(t.split(":")[2]) for t in keys.split() if t.startswith("wk:") and t.count(":") == 2 and t.split(":")[2].isdigit()), 0)
+
+
+def whose(wk):   # a session may still hold the login ccp left: its numbers go to the account whose week they are, or to none
+    known = {i: week(last(i)[0]) for i in IDS}
+    same = [i for i in IDS if known[i] and abs(known[i] - wk) <= 300]
+    if same:
+        return same[0] if len(same) == 1 else None
+    others = [i for i in IDS if i != THIS and SEEN.get(i, ("",))[0] != "not logged in"]
+    if THIS in IDS and all(known[i] > NOW for i in others) and known[THIS] < wk:
+        return THIS   # no other account's week, and those are all known
+    return None
+
+
+def take():
+    keys, at = given()
+    wk = week(keys)
+    i = whose(wk) if wk > NOW else None
+    if not i:
+        return
+    had, when = last(i)
+    if at <= when:   # older than what is known (a session that has been idle)
+        return
+    LIVE[i] = (live_merge(had, keys), at)
+    try:
+        tmp = f"{LIVE_AT}.{os.getpid()}"
+        with open(tmp, "w") as f:
+            f.writelines(f"{k}\t{v[0]}\t{v[1]}\n" for k, v in LIVE.items() if k in IDS)
+        os.replace(tmp, LIVE_AT)
+    except OSError:
+        pass
+
+
+if SEEN:
+    take()
 
 
 def paint(code, text):
@@ -1999,7 +2110,7 @@ def left(ts):   # 5d2h, 4h49m, 9m
 
 def parse(i):   # {"5h": (used, resets), "wk": …, "m.Fable": …} as ccp watch last saw it
     out = {}
-    for tok in SEEN.get(i, ("", "", "", ""))[1].split():
+    for tok in (last(i)[0] if SEEN else "").split():
         key, used, ts = (tok.split(":") + ["0", "0"])[:3]
         try:
             out[key] = (float(used or 0), int(ts) if ts.isdigit() else 0)
@@ -2023,10 +2134,23 @@ def old_text(sec):   # 4m ago, 1h20m ago
     return (f"{h}시간 {m}분 전" if h else f"{m}분 전") if KO else (f"{h}h{m:02d}m ago" if h else f"{m}m ago")
 
 
+def again(i):   # when ccp asks about it next, once it was told to wait
+    try:
+        with open(os.path.join(os.path.dirname(os.environ["CCP_SEEN"]), "asked")) as f:
+            for c in (l.rstrip("\n").split("\t") for l in f):
+                if c[0] == i and int(c[2]) > 0 and float(c[1]) > NOW:
+                    return f" · {left(float(c[1]))}" + (" 뒤" if KO else "")
+    except (OSError, ValueError, IndexError):
+        pass
+    return ""
+
+
 def column(row):
     n, i = row["n"], row["id"]
     name = f"#{n}" if i == "default" or i.startswith("acct-") else f"#{n} {i}"
     text, _, asof, note = SEEN.get(i, ("", "", "", ""))
+    if SEEN and last(i)[1]:
+        asof = str(last(i)[1])
     expired = note == "expired" or text.startswith(("needs renewal", "sign-in expired"))
     aside = note == "aside" or text.startswith("kept aside")   # #1's own login waits while ~/.claude holds another's
     tags = (([old_text(NOW - int(asof))] if asof.isdigit() and NOW - int(asof) >= OLD else []) + ([W["expired"]] if expired and data[i] else [])
@@ -2043,7 +2167,7 @@ def column(row):
         elif expired:   # nothing was ever read, and it will not be until that account is opened once
             lines += [paint("38;5;179", W["expired"]), paint("2", f"ccp run -p {n}")]
         elif text.startswith(("asked too often", "offline", "usage unavailable")):
-            lines.append(paint("2", W["busy"]))
+            lines.append(paint("2", W["busy"] + again(i)))
         elif SEEN or text:
             lines.append(paint("2", W["wait"]))
         return lines

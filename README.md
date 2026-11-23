@@ -204,6 +204,11 @@ ccp statusline on              # put it back
 - **No requests.** `ccp prompt --usage` reads only `~/.claude-profiles` (the profile list and `seen`, what `ccp service`
   saw last). It never calls the usage endpoint or Claude Code, so running it every minute in every session costs no
   usage requests and no tokens.
+- **Claude Code's own numbers.** Claude Code gives its status line the session's 5-hour and week limits, as its last answer
+  reported them. `ccp prompt --usage` keeps them in `live`, so the account in use shows its numbers even while the usage endpoint
+  answers "asked too often", and `ccp service` sees that it is full. When the week resets tells whose they are: a session still
+  on the login ccp left adds to that account, and numbers that cannot be told apart are dropped. A model's own weekly limit
+  (Fable) comes only from the endpoint.
 
 ## Move on when an account is full
 
@@ -440,9 +445,10 @@ Measured on a MacBook (2026-11-19):
 
 - Each check is one `GET https://api.anthropic.com/api/oauth/usage` per account, the request Claude's `/usage` makes. It is not
   a model call and is not counted against the usage limits, as far as we can tell.
-- The endpoint's own rate limit is not published, and its 429 says `Retry-After: 0`, which tells nothing. On a 429 (asked too
-  often) that account waits twice as long each time, up to 10 minutes; the status line keeps showing its last numbers, with
-  how old they are.
+- The endpoint's own rate limit is not published. Its 429 (asked too often) says how long to wait in `Retry-After` (0 at times,
+  which tells nothing; 1412 seconds was seen, counting down to a fixed time). ccp waits that long, and at least twice as long each
+  time, up to 10 minutes (5 for the account in use). The status line keeps showing its last numbers with how old they are, or
+  when it is asked again if none were read.
 - Every computer asks on its own. An account added on many people's computers is asked by every one of them: the account in
   use once a minute, the others once every 5 minutes. With many people, lengthen the interval (`ccp service start --every 120`).
 - An access token lasts about 8 hours, and ccp does not renew one. An account whose token ran out cannot be asked: its last
