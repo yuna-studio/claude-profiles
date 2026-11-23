@@ -153,16 +153,17 @@ import http.server, json, os, socketserver, sys
 FULL = {"five_hour": {"utilization": 100.0, "resets_at": "2099-01-01T00:00:00Z"}, "seven_day": {"utilization": 30.0, "resets_at": "2099-01-01T00:00:00Z"}}
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        open(sys.argv[1] + ".hits", "a").write("hit\n")   # every request, for the status line test
+        open(sys.argv[1] + (".phits" if self.path.endswith("/profile") else ".hits"), "a").write("hit\n")   # every request, for the status line test
         tok = self.headers.get("Authorization", "")
         if self.path.endswith("/profile"):   # whose login a token is: ccp asks once for #1's address
-            body = {"account": {"email": "me@x.com"}} if tok == "Bearer tok-1" else None
+            body = {"Bearer tok-1": {"account": {"email": "me@x.com"}}, "Bearer tok-four": {"account": {"email": "four@x.com"}}}.get(tok)
             if body is None or self.headers.get("anthropic-beta") != "oauth-2025-04-20":
                 self.send_response(401); self.end_headers(); return
             self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(body).encode()); return
         body = {"Bearer tok-1": {"limits": [{"kind": "weekly_all", "percent": 48, "resets_at": "2099-01-01T00:00:00+00:00"},
                                             {"kind": "weekly_scoped", "percent": 0, "resets_at": "2099-01-01T00:00:00+00:00", "scope": {"model": {"display_name": "Fable"}}}],
                                  "five_hour": {"utilization": 91.0, "resets_at": "2099-01-01T00:00:00Z"}},
+                "Bearer tok-four": {"seven_day": {"utilization": 93.0, "resets_at": "2099-01-01T00:00:00Z"}},
                 "Bearer tok-3": {"seven_day": {"utilization": 12.0, "resets_at": "2099-01-01T00:00:00Z"}},
                 "Bearer tok-low": {"seven_day": {"utilization": 12.0, "resets_at": "2099-01-01T00:00:00Z"}},
                 "Bearer tok-full": FULL, "Bearer tok-full2": FULL}.get(tok)
@@ -355,6 +356,23 @@ ok "use 1: the note is written again after the next lending" '[ -e "$P/back-emai
 cp "$HOME/.claude.json.usage" "$HOME/.claude.json"
 ok "usage: once ~/.claude.json names #1 again, the note is dropped" 'has "$(ccp usage)" "me@x.com" && [ ! -e "$P/back-email" ]'
 [ "$had_login" = 1 ] || rm -f "$HOME/.claude/.stub-login"
+
+# the account Claude Code shows is a day-long cache in ~/.claude.json: a swap drops its date, nothing else
+echo '{"keep":1,"oauthAccount":{"emailAddress":"me@x.com","profileFetchedAt":123}}' > "$HOME/.claude.json"
+ccp use 3 >/dev/null
+ok "use: Claude Code reads its account again at its next start" '! grep -q profileFetchedAt "$HOME/.claude.json" && grep -q "\"keep\": 1" "$HOME/.claude.json" && grep -q me@x.com "$HOME/.claude.json" && [ ! -e "$HOME/.claude.json.lock" ]'
+ccp use 1 >/dev/null; cp "$HOME/.claude.json.usage" "$HOME/.claude.json"
+
+# a session still on #3 renewed its login into ~/.claude while that is #1's again: #3's numbers never show as #1's
+rm -f "$P/seen" "$P/asked" "$P/full" "$P/who" "$PORT_FILE.phits"
+setcred tok-1; ccp watch --once --at 99 >/dev/null
+ok "watch: #1's own login gives #1's numbers" 'grep -q "^default	.*wk:48:" "$P/seen"'
+setcred tok-four; out="$(ccp watch --once --at 99)"; out="$out$(ccp usage)"
+ok "watch: another account's login in #1's place: its numbers are not #1's, and it says so" 'grep -q "^default	holds #3.s login (four@x.com)" "$P/seen" && ! grep -q "^default.*wk:" "$P/seen" && has "$out" "holds #3"'
+ok "status line: it says another account's login" 'has "$(NO_COLOR=1 LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 CCP_ACTIVE=default ccp prompt --usage)" "another account"'
+ccp watch --once --at 99 >/dev/null
+ok "watch: whose a login is, is asked once per token" '[ "$(wc -l < "$PORT_FILE.phits" | tr -d " ")" = 2 ]'
+setcred tok-1
 rm -f "$P/full" "$P/seen" "$P/asked"
 unset CCP_RETRY_WAIT
 
@@ -383,6 +401,18 @@ setcred tok-full
 h5="$(hits)"; out="$(ccp watch --once --at 99)"; h6="$(hits)"
 ok "watch: about to hand over, the next account is asked ahead of its schedule" 'has "$out" "Claude Code now uses #3 four@x.com" && [ $((h6 - h5)) -ge 2 ]'
 ccp use 1 >/dev/null; setcred tok-1; rm -f "$P/asked" "$P/moved" "$P/stuck"
+
+# the account in use waits after 'asked too often' too (asking every round kept it blocked); a limit a session hit asks at once
+ccp watch --once --at 99 >/dev/null; setcred tok-busy
+out="$(ccp watch --once --at 99)"; h7="$(hits)"
+ok "watch: 'asked too often' puts the account in use on a pause, its numbers stay" 'has "$out" "asking about it again in 120s" && grep -q "^default	[0-9]*	120$" "$P/asked" && grep -q "^default	.*wk:48:" "$P/seen"'
+ccp watch --once --at 99 >/dev/null; h8="$(hits)"
+ok "watch: while it waits it is not asked" '[ "$h8" = "$h7" ] && grep -q "^default	[0-9]*	120$" "$P/asked"'
+CCP_LIMIT_HIT=1 ccp watch --once --at 99 >/dev/null; h9="$(hits)"
+ok "watch: a limit a session hit asks at once" '[ "$h9" -gt "$h8" ]'
+setcred tok-1; printf 'default\t0\t120\n' > "$P/asked"; ccp watch --once --at 99 >/dev/null
+ok "watch: an answer ends that pause too" 'grep -q "^default	[0-9]*	0$" "$P/asked"'
+rm -f "$P/asked" "$P/moved" "$P/stuck" "$P/hit" "$P/full"
 
 # a sign-in that expired keeps its last numbers, with the reason; the status line says how old they are and how to renew
 ccp watch --once --at 99 >/dev/null

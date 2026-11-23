@@ -499,7 +499,7 @@ PY
 }
 
 IFS= read -r -d '' LOGIN_PY <<'PY' || true   # swap_login's keychain (or credentials file) work; tokens never reach a command line
-import hashlib, json, os, re, subprocess, sys, unicodedata
+import hashlib, json, os, re, subprocess, sys, time, unicodedata
 
 HOME_DIR, BASE = os.environ["CCP_HOME_DIR"], os.environ["CCP_BASE_DIR"]
 ROWS = [dict(zip(("n", "id", "dir", "label"), l.split("\t"))) for l in os.environ.get("CCP_ROWS", "").splitlines() if l]
@@ -633,6 +633,38 @@ def stash_email(keep):   # #1's address while its login is kept aside: Claude Co
             f.write(e + "\n")
 
 
+def forget_profile():   # Claude Code keeps the account it shows (~/.claude.json) for a day: let its next start read it again
+    p = os.path.realpath(os.path.expanduser("~/.claude.json"))
+    lock = p + ".lock"   # Claude Code's own
+    for _ in range(30):
+        try:
+            os.mkdir(lock)
+            break
+        except FileExistsError:
+            time.sleep(0.1)
+        except OSError:
+            return
+    else:
+        return   # busy: it stays for a day at most, as before
+    try:
+        with open(p) as f:
+            d = json.load(f)
+        if not isinstance(d.get("oauthAccount"), dict) or d["oauthAccount"].pop("profileFetchedAt", None) is None:
+            return
+        tmp = p + f".ccp.{os.getpid()}"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, os.stat(p).st_mode & 0o777)
+        with os.fdopen(fd, "w") as f:
+            json.dump(d, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, p)
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            os.rmdir(lock)
+        except OSError:
+            pass
+
+
 def same(a, b):   # one login: a token in common, or the same account
     return any(a.get(k) and a.get(k) == b.get(k) for k in ("accessToken", "refreshToken", "accountUuid"))
 
@@ -682,6 +714,7 @@ else:
     slot["claudeAiOauth"] = oauth(t)
     save("default", slot)
     lend(to)
+forget_profile()
 print(f"{to}\t1")
 PY
 
@@ -1282,6 +1315,44 @@ def limits(u):
     return sorted(out, key=lambda x: order.get(x["name"], 2))
 
 
+def who(c):
+    """The address a login belongs to, asked of Anthropic once per token and written down; "" when it cannot be told now."""
+    home, at = os.environ.get("CCP_HOME_DIR") or "", c.get("accessToken") or ""
+    if not home or not at:
+        return ""
+    fp, p, known = hashlib.sha256(at.encode()).hexdigest()[:16], os.path.join(home, "who"), []
+    try:
+        with open(p) as f:
+            known = [k for k in (l.rstrip("\n").split("\t") for l in f) if len(k) == 3 and k[2].isdigit()]
+    except Exception:
+        pass
+    for k in known:
+        if k[0] == fp and (k[1] or time.time() - int(k[2]) < 600):   # no answer: not again for 10 minutes
+            return k[1]
+    req = urllib.request.Request(PROFILE_URL, headers={"Authorization": "Bearer " + at, "anthropic-beta": "oauth-2025-04-20",
+                                                       "User-Agent": "ccp/" + os.environ.get("CCP_VERSION", "")})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as f:
+            a = json.load(f).get("account") or {}
+        e = a.get("email") or a.get("email_address") or ""
+    except Exception:
+        e = ""
+    try:
+        tmp = p + f".{os.getpid()}"
+        with open(tmp, "w") as f:
+            f.writelines("\t".join(k) + "\n" for k in [k for k in known if k[0] != fp][-19:] + [[fp, e, str(int(time.time()))]])
+        os.replace(tmp, p)
+    except Exception:
+        pass
+    return e
+
+
+def mail(row):   # the address a row goes by
+    if row["id"] != "default":
+        return email(row["dir"])
+    return kept_email() if SLOT != "default" else own_email(row["dir"])
+
+
 def fetch(row, ask=True):
     c = creds(row)
     aside = SLOT != "default" and row["id"] == "default"
@@ -1297,6 +1368,14 @@ def fetch(row, ask=True):
     if not ask:   # not asked this round: ccp watch uses its last good numbers
         r["cached"] = True
         return r
+    if row["id"] == SLOT:   # the login in ~/.claude: a session still on another account may have renewed that account's login into it
+        e = who(c)
+        other = next((x for x in ROWS if x["id"] != row["id"] and mail(x).lower() == e.lower()), None) if e else None
+        if other:   # its numbers would be the other account's
+            r["error"] = f"holds #{other['n']}'s login ({e}); sign in again: ccp login {row['n']}"
+            return r
+        if e and row["id"] == "default":   # ~/.claude.json may name an earlier account for a day
+            r["email"] = e
     req = urllib.request.Request(URL, headers={"Authorization": "Bearer " + c["accessToken"], "anthropic-beta": "oauth-2025-04-20",
                                                "User-Agent": "ccp/" + os.environ.get("CCP_VERSION", "")})
     try:
@@ -1457,7 +1536,11 @@ def watch():
             pass
 
     in_use = SLOT if any(r["id"] == SLOT for r in ROWS) else "default"
-    by = {in_use: fetch_retry(next(r for r in ROWS if r["id"] == in_use))}   # every round: it is the one that switches
+    cur_row = next(r for r in ROWS if r["id"] == in_use)
+    rest = IDLE_EVERY > 0 and not HIT and asked.get(in_use, (0.0, 0))[1] > 0 and now < asked[in_use][0]   # asking again at once keeps it blocked
+    by = {in_use: fetch(cur_row, ask=False) if rest else fetch_retry(cur_row)}   # every round: it is the one that switches
+    if by[in_use].pop("cached", False):   # as if it had just said so again
+        by[in_use]["error"] = "asked too often; next refresh"
     urgent = HIT or blocking(by[in_use]) is not None   # about to hand over: the account it hands over to needs today's numbers
 
     def may_ask(i):   # an account not in use is asked every IDLE_EVERY seconds, or after the pause 'asked too often' set
@@ -1483,7 +1566,7 @@ def watch():
     write("full", "".join(f"{i}\t{l['name']}\t{l['used']:.0f}\t{int(l['resets'] or 0)}\n" for i, l in full.items()))
 
     def transient(r):
-        return r["error"] and not r["error"].startswith(("not logged in",) + EXPIRED)
+        return r["error"] and not r["error"].startswith(("not logged in", "holds #") + EXPIRED)
 
     def seen(r):   # id, what a person reads (ccp service status), name:used:resets for the status line, when it was read, a note
         i = r["id"]
@@ -1511,10 +1594,13 @@ def watch():
 
     for r in results:   # an account not in use that says 'asked too often' waits twice as long each time, up to 10 min; the others go on
         i, err = r["id"], r["error"] or ""
-        if i == in_use or r.get("cached"):
+        if r.get("cached") or (i == in_use and rest):
+            continue
+        if i == in_use and not err.startswith("asked too often"):   # asked every round, unless it was told to wait
+            asked[i] = (now, 0)
             continue
         if err.startswith(("asked too often", "usage unavailable", "offline")):
-            pause = min(600, max(asked.get(i, (0.0, 0))[1], 60) * 2)
+            pause = min(300 if i == in_use else 600, max(asked.get(i, (0.0, 0))[1], 60) * 2)
             why = "the usage endpoint says asked too often" if err.startswith("asked") else err
             print(time.strftime("%Y-%m-%d %H:%M:%S ") + f"{name(i)}: {why}; asking about it again in {pause}s", flush=True)
         else:
@@ -1867,8 +1953,8 @@ import os, re, time, unicodedata
 
 ROWS = [dict(zip(("n", "id", "dir", "label"), l.split("\t"))) for l in os.environ.get("CCP_ROWS", "").splitlines() if l]
 THIS, KO, COLOR = os.environ.get("CCP_THIS", ""), os.environ.get("CCP_KO") == "1", not os.environ.get("NO_COLOR")
-W = ({"this": "이 세션", "wait": "확인 중", "out": "로그인 필요", "expired": "갱신 필요", "busy": "조회 막힘", "aside": "보관 중"} if KO else
-     {"this": "this session", "wait": "checking", "out": "signed out", "expired": "needs renewal", "busy": "rate limited", "aside": "kept aside"})
+W = ({"this": "이 세션", "wait": "확인 중", "out": "로그인 필요", "expired": "갱신 필요", "busy": "조회 막힘", "aside": "보관 중", "mixed": "다른 계정 로그인"} if KO else
+     {"this": "this session", "wait": "checking", "out": "signed out", "expired": "needs renewal", "busy": "rate limited", "aside": "kept aside", "mixed": "another account's login"})
 OLD = 120   # seconds: numbers older than this say how old they are
 NOW = time.time()
 SEEN = {}
@@ -1950,6 +2036,8 @@ def column(row):
     if not d:
         if text == "not logged in":
             lines.append(paint("2", W["out"]))
+        elif text.startswith("holds #"):   # its numbers would be the other account's
+            lines.append(paint("38;5;179", W["mixed"]))
         elif aside:   # its token ran out while it waited and nothing was read before: numbers come back with it (ccp use 1)
             lines.append(paint("2", W["aside"]))
         elif expired:   # nothing was ever read, and it will not be until that account is opened once
