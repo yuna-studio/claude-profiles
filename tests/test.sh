@@ -173,6 +173,8 @@ class H(http.server.BaseHTTPRequestHandler):
             if first:
                 self.send_response(429); self.end_headers(); return
             body = FULL
+        if tok == "Bearer tok-wait":   # says how long to wait
+            self.send_response(429); self.send_header("Retry-After", "1412"); self.end_headers(); return
         if tok == "Bearer tok-busy":
             self.send_response(429); self.end_headers(); return
         if self.headers.get("anthropic-beta") != "oauth-2025-04-20" or body is None:
@@ -413,6 +415,54 @@ ok "watch: a limit a session hit asks at once" '[ "$h9" -gt "$h8" ]'
 setcred tok-1; printf 'default\t0\t120\n' > "$P/asked"; ccp watch --once --at 99 >/dev/null
 ok "watch: an answer ends that pause too" 'grep -q "^default	[0-9]*	0$" "$P/asked"'
 rm -f "$P/asked" "$P/moved" "$P/stuck" "$P/hit" "$P/full"
+
+# the endpoint says how long to wait (Retry-After): it is not asked again before that
+rm -f "$P/seen"; setcred tok-wait; h10="$(hits)"
+out="$(ccp watch --once --at 99)"
+ok "watch: the wait the endpoint asks for is kept" 'has "$out" "asking about it again in 1412s" && grep -q "^default	[0-9]*	1412$" "$P/asked"'
+ok "watch: it is not asked a second time at once" '[ "$(grep -c . "$PORT_FILE.hits")" -ge "$h10" ] && grep -q "^default	asked too often; again in 23m	$" "$P/seen"'
+h11="$(hits)"; ccp watch --once --at 99 >/dev/null
+ok "watch: until then it is not asked" '[ "$(hits)" = "$h11" ]'
+ok "status line: asked too often says when it is asked again" 'has "$(NO_COLOR=1 LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 CCP_ACTIVE=default ccp prompt --usage </dev/null)" "rate limited · 23m"'
+
+# Claude Code gives its status line this session's own limits: shown, and known to ccp watch, while the endpoint does not answer
+now="$(date +%s)"; w1=$((now + 500000)); w4=4070908800   # #3's week is the one the server says (2099)
+given() { printf '{"session_id":"s","transcript_path":"%s","rate_limits":{"five_hour":{"used_percentage":%s,"resets_at":%s},"seven_day":{"used_percentage":%s,"resets_at":%s}}}' "$T/tr.jsonl" "$1" "$2" "$3" "$4"; }
+line() { given "$@" | NO_COLOR=1 LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 CCP_ACTIVE=default ccp prompt --usage; }
+others() {   # every account but #1 and #3: their weeks are known, or not
+  local i k=0
+  while IFS= read -r i; do
+    case "$i" in default|acct-4) continue ;; esac
+    k=$((k + 1))
+    if [ "$1" = known ]; then printf '%s\tweek 1%%\twk:1:%s\t%s\n' "$i" "$((now + 100000 + k * 10000))" "$((now - 300))"; else printf '%s\tasked too often; next refresh\t\n' "$i"; fi
+  done < "$P/order"
+}
+keepseen() { { printf 'default\tasked too often; again in 23m\t\nacct-4\tweek 12%%\twk:12:%s\t%s\n' "$w4" "$((now - 300))"; others "$1"; } > "$P/seen"; }
+rm -f "$P/live"; : > "$T/tr.jsonl"
+keepseen unknown; out="$(line 34 $((now + 9000)) 41 "$w1")"
+ok "status line: with an account whose week is not known, numbers of an unknown week are nobody's" '! grep -q "^default	" "$P/live" 2>/dev/null'
+keepseen known; out="$(line 34 $((now + 9000)) 41 "$w1")"
+ok "status line: Claude Code's own numbers show while the endpoint does not answer" 'has "$out" " 41%" && has "$out" " 34%" && grep -q "^default	5h:34:[0-9]* wk:41:$w1	[0-9]*$" "$P/live" && ! has "$out" "rate limited" 2>/dev/null'
+out="$(line 90 $((now + 9000)) 88 "$w4")"
+ok "status line: a session still on another account's login: its numbers go to that account, never to this one" 'grep -q "^acct-4	.*wk:88:$w4" "$P/live" && grep -q "^default	5h:34:[0-9]* wk:41:$w1" "$P/live"'
+python3 -c 'import os,sys; os.utime(sys.argv[1], (int(sys.argv[2]),) * 2)' "$T/tr.jsonl" "$((now - 4000))"
+out="$(line 50 $((now + 9000)) 60 "$w1")"
+ok "status line: a session idle since before the last numbers says nothing new" 'grep -q "^default	5h:34:[0-9]* wk:41:$w1" "$P/live"'
+python3 -c 'import os,sys; os.utime(sys.argv[1], (int(sys.argv[2]),) * 2)' "$T/tr.jsonl" "$((now + 20))"
+out="$(line 35 $((now + 9000)) 40 "$w1")"
+ok "status line: in one window the numbers only grow" 'grep -q "^default	5h:35:[0-9]* wk:41:$w1" "$P/live"'
+ok "status line: input that is not Claude Code's changes nothing" '[ -n "$(echo hello | NO_COLOR=1 CCP_ACTIVE=default ccp prompt --usage)" ] && grep -q "^default	5h:35:" "$P/live"'
+ccp watch --once --at 99 >/dev/null
+ok "watch: it keeps them as the last numbers of an account it cannot ask" 'grep -q "^default	5-hour 35%, week 41%	5h:35:[0-9]* wk:41:$w1	[0-9]*$" "$P/seen" && [ ! -e "$P/slot" ]'
+python3 -c 'import os,sys; os.utime(sys.argv[1], (int(sys.argv[2]),) * 2)' "$T/tr.jsonl" "$((now + 40))"
+line 100 $((now + 9000)) 41 "$w1" >/dev/null
+out="$(ccp watch --once --at 99)"
+ok "watch: full by Claude Code's own numbers is full, though the endpoint does not answer" 'has "$out" "#1 me@x.com is at 100% of its 5-hour limit"'
+ccp use 1 >/dev/null; setcred tok-1
+printf 'default\t0\t0\n' > "$P/asked"; sed -i.bak 's/	[0-9]*$/	1000/' "$P/live"; rm -f "$P/live.bak" "$P/benched"
+ccp watch --once --at 99 >/dev/null
+ok "watch: numbers it reads later win over older ones of the status line" 'grep -q "^default	.*wk:48:" "$P/seen"'
+rm -f "$P/asked" "$P/moved" "$P/stuck" "$P/hit" "$P/full" "$P/live" "$P/seen" "$P/benched" "$P/slot"
 
 # a sign-in that expired keeps its last numbers, with the reason; the status line says how old they are and how to renew
 ccp watch --once --at 99 >/dev/null
