@@ -222,7 +222,8 @@ holds) reaches 99% (`--at`) of its 5-hour or weekly limit, `~/.claude` takes the
 its login goes back. Sessions stay where they are, as above; a busy one (a turn, a tool, a question) is never cut short.
 
 **Without waiting for the next check.** A check every minute can be late, and the usage endpoint sometimes answers "asked
-too often" (a shared account is asked by every computer that has it). Three things keep a full account from staying:
+too often" (a shared account is asked by every computer that has it). Four things keep a full account from staying, and
+the last keeps two accounts from swapping back and forth:
 
 - **The account in use is asked again at once** (a second try 3 s later) when the answer is "asked too often", instead of
   being taken for "not full". It is asked every round, whatever the other accounts answer. The log says which account the
@@ -233,11 +234,14 @@ too often" (a shared account is asked by every computer that has it). Three thin
   (`rate_limit`, which runs when a turn ends on an API error) into `~/.claude/settings.json`; it runs `ccp limit-hit`,
   which returns at once and starts the check in the background. Only a session on the login in `~/.claude` counts (one on
   a folder rule, `-p` or its own config folder keeps its account), and the other sessions that hit it in the same minute
-  wait for that check. The account in use then counts as full unless its numbers say otherwise: below 90% (or `--at`, if
-  lower) it was a burst and nothing moves. When it cannot be asked, its last good numbers decide: below 80% it was most
-  likely a session still on the token of the account ccp just left, so nothing moves; with higher numbers or none, it counts
-  as full. The hook cannot change what Claude Code does with that turn; the restart and `continue` below carry the work on.
+  wait for that check. Numbers that say the account in use has room win, and nothing moves: the session may still hold an
+  older token (the account ccp just left, or the one Claude Code's daemon read when it started). When it cannot be asked,
+  its last good numbers decide: below 95% (or `--at`, if lower) nothing moves; with higher numbers or none, it counts as
+  full. The hook cannot change what Claude Code does with that turn; the restart and `continue` below carry the work on.
   Only ccp's own entry is touched (a command with `ccp limit-hit`); your hooks stay.
+- **An account ccp moved off because it was full is not lent again** before that limit resets (kept in `benched`) while it
+  cannot be asked; fresh numbers under the limit still bring it back. A sign-in that has run out is not lent either when its
+  last numbers were full: Claude Code would renew it straight into the same limit.
 
 Settings, all on by default (`/ccp:config` inside Claude Code):
 

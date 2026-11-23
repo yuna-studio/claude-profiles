@@ -25,7 +25,9 @@ case "${1:-}" in   # background sessions: stop, --bg --resume, agents
   respawn) echo "respawn $2 CONFIG=${CLAUDE_CONFIG_DIR:-unset}" >> "$HOME/stub.log"
            [ -f "$cfg/respawn-$2.sh" ] && /bin/bash "$cfg/respawn-$2.sh"; exit 0 ;;   # a test's own: the same session, a new process
   daemon) echo "daemon ${*:2} CONFIG=${CLAUDE_CONFIG_DIR:-unset}" >> "$HOME/stub.log"
-          [ "${2:-}" = status ] && [ -f "$HOME/daemon-up" ] && echo "pid:     4242"; exit 0 ;;
+          dp="$(cat "$HOME/daemon-pid" 2>/dev/null || echo 4242)"
+          [ "${2:-}" = stop ] && [ ! -f "$HOME/daemon-stuck" ] && echo $((dp + 1)) > "$HOME/daemon-pid"   # it comes back as a new process
+          [ "${2:-}" = status ] && [ -f "$HOME/daemon-up" ] && echo "pid:     $dp"; exit 0 ;;
   agents) echo "agents CONFIG=${CLAUDE_CONFIG_DIR:-unset}" >> "$HOME/stub.log"
           [ -f "$cfg/stub-agents.json" ] && { cat "$cfg/stub-agents.json"; exit 0; }   # a test's own list (pid, cwd, kind)
           st='"status": "idle"'; case "${CLAUDE_CONFIG_DIR:-}" in *acct-6) st='"state": "failed"' ;; esac   # acct-6: comes up, then fails
@@ -153,12 +155,17 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         open(sys.argv[1] + ".hits", "a").write("hit\n")   # every request, for the status line test
         tok = self.headers.get("Authorization", "")
+        if self.path.endswith("/profile"):   # whose login a token is: ccp asks once for #1's address
+            body = {"account": {"email": "me@x.com"}} if tok == "Bearer tok-1" else None
+            if body is None or self.headers.get("anthropic-beta") != "oauth-2025-04-20":
+                self.send_response(401); self.end_headers(); return
+            self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(body).encode()); return
         body = {"Bearer tok-1": {"limits": [{"kind": "weekly_all", "percent": 48, "resets_at": "2099-01-01T00:00:00+00:00"},
                                             {"kind": "weekly_scoped", "percent": 0, "resets_at": "2099-01-01T00:00:00+00:00", "scope": {"model": {"display_name": "Fable"}}}],
                                  "five_hour": {"utilization": 91.0, "resets_at": "2099-01-01T00:00:00Z"}},
                 "Bearer tok-3": {"seven_day": {"utilization": 12.0, "resets_at": "2099-01-01T00:00:00Z"}},
                 "Bearer tok-low": {"seven_day": {"utilization": 12.0, "resets_at": "2099-01-01T00:00:00Z"}},
-                "Bearer tok-full": FULL}.get(tok)
+                "Bearer tok-full": FULL, "Bearer tok-full2": FULL}.get(tok)
         if tok == "Bearer tok-flaky":   # asked too often the first time only, then the 5-hour limit is full
             first = not os.path.exists(sys.argv[1] + ".flaky")
             open(sys.argv[1] + ".flaky", "a").write("x")
@@ -184,7 +191,8 @@ SRV=$!
 i=0; while [ ! -s "$PORT_FILE" ] && [ "$i" -lt 100 ]; do sleep 0.2; i=$((i + 1)); done   # a cold python3 can take seconds
 [ -s "$PORT_FILE" ] || { echo "fake usage endpoint did not start:"; cat "$T/srv.log"; }
 CCP_USAGE_URL="http://127.0.0.1:$(cat "$PORT_FILE")/usage"
-export CCP_NO_KEYCHAIN=1 CCP_USAGE_URL
+CCP_PROFILE_URL="http://127.0.0.1:$(cat "$PORT_FILE")/profile"   # never Anthropic's own
+export CCP_NO_KEYCHAIN=1 CCP_USAGE_URL CCP_PROFILE_URL
 export no_proxy=127.0.0.1,localhost NO_PROXY=127.0.0.1,localhost   # macOS runners: urllib would follow the system proxy
 export CCP_IDLE_EVERY=0   # every round asks every account, as the older tests expect; the tests of the pauses set their own
 future=$(( ($(date +%s) + 86400) * 1000 ))
@@ -295,6 +303,46 @@ ccp use 1 >/dev/null; setcred tok-full
 CCP_ACTIVE=default ccp limit-hit; sleep 1
 ok "limit-hit: the other sessions that hit it in the same minute wait for that check" '[ ! -e "$P/slot" ]'
 rm -f "$P/hit" "$P/full" "$P/seen" "$P/asked"; setcred tok-1
+
+# a session's limit error while the account in use can be read: the numbers win (the session may hold an older token,
+# from the account ccp left or from when Claude Code's daemon started)
+rm -f "$P/benched"
+out="$(CCP_LIMIT_HIT=1 ccp watch --once --at 99)"
+ok "watch: a limit error while the numbers say there is room (91% of 99) moves nothing" '[ ! -e "$P/slot" ] && ! has "$out" "Claude Code now uses" 2>/dev/null'
+setcred tok-full
+out="$(ccp watch --once --at 99)"
+ok "watch: the full account it moves off is benched until that limit resets" 'has "$out" "Claude Code now uses #3 four@x.com" && grep -q "^default	[0-9]*$" "$P/benched"'
+ccp use 1 >/dev/null; setcred tok-1; rm -f "$P/benched" "$P/asked"
+ccp watch --once --at 99 >/dev/null   # a good round: the last numbers of every account
+cp "$P/acct-4/.credentials.json" "$T/cred4c"; cp "$P/acct-5/.credentials.json" "$T/cred5"
+echo "{\"claudeAiOauth\":{\"accessToken\":\"tok-busy\",\"refreshToken\":\"rt-3b\",\"expiresAt\":$future}}" > "$P/acct-4/.credentials.json"
+printf 'acct-4\t%s\n' "$(( $(date +%s) + 3600 ))" > "$P/benched"
+setcred tok-full
+out="$(ccp watch --once --at 99)"
+ok "watch: an account it moved off because it was full is not lent again while it cannot be asked (no flip-flop)" '! has "$out" "now uses #3" 2>/dev/null && has "$out" "Claude Code now uses #4"'
+ccp use 1 >/dev/null; rm -f "$P/benched" "$P/asked" "$P/stuck"; cp "$T/cred4c" "$P/acct-4/.credentials.json"
+echo "{\"claudeAiOauth\":{\"accessToken\":\"tok-full2\",\"refreshToken\":\"rt-5\",\"expiresAt\":$future}}" > "$P/acct-5/.credentials.json"
+setcred tok-1; ccp watch --once --at 99 >/dev/null   # #4 read full
+echo '{"claudeAiOauth":{"accessToken":"tok-old","refreshToken":"rt-5","expiresAt":1000}}' > "$P/acct-5/.credentials.json"   # then its token runs out
+echo "{\"claudeAiOauth\":{\"accessToken\":\"tok-busy\",\"refreshToken\":\"rt-3b\",\"expiresAt\":$future}}" > "$P/acct-4/.credentials.json"
+printf 'acct-4\t%s\n' "$(( $(date +%s) + 3600 ))" > "$P/benched"
+setcred tok-full
+out="$(ccp watch --once --at 99)"
+ok "watch: an expired sign-in whose last numbers were full is not lent (Claude Code would renew it into the same limit)" '! has "$out" "now uses #4" 2>/dev/null && has "$out" "Every account is full"'
+ccp use 1 >/dev/null; cp "$T/cred4c" "$P/acct-4/.credentials.json"; cp "$T/cred5" "$P/acct-5/.credentials.json"
+rm -f "$P/benched" "$P/asked" "$P/stuck" "$P/slot" "$P/moved"; setcred tok-1
+
+# #1's own address while its login is kept aside: Claude Code soon names the lent account in ~/.claude.json
+rm -f "$P/stash-email"; cp "$HOME/.claude.json.usage" "$HOME/.claude.json"
+ccp use 3 >/dev/null
+ok "use: #1's address is written down while its login is kept aside" '[ "$(cat "$P/stash-email")" = me@x.com ]'
+echo '{"oauthAccount":{"emailAddress":"four@x.com"}}' > "$HOME/.claude.json"
+ok "ls: the kept-aside row shows #1's own address, not the lent account's" 'ccp ls | grep -q "^  1 *me@x.com *kept aside"'
+rm -f "$P/stash-email"
+ok "usage: kept aside by an older ccp without its address: asked once, then written down" 'has "$(ccp usage)" "me@x.com" && [ "$(cat "$P/stash-email")" = me@x.com ]'
+ccp use 1 >/dev/null; cp "$HOME/.claude.json.usage" "$HOME/.claude.json"
+ok "use 1: the address goes with the login it named" '[ ! -e "$P/stash-email" ]'
+rm -f "$P/full" "$P/seen" "$P/asked"
 unset CCP_RETRY_WAIT
 
 # an account not in use is asked every 5 minutes, not every minute; 'asked too often' puts only that account on a pause
@@ -385,6 +433,10 @@ ok "sw inside a background session: the login changes, the session runs on where
 ok "readopt: the daemon restarts with its sessions left running, and adopts them again" 'grep -q "^daemon stop --any --keep-workers CONFIG=unset$" "$HOME/stub.log" && grep -q "^agents CONFIG=unset$" "$HOME/stub.log" && has "$(cat "$HOME/stub-run.out")" "new background sessions start with it" && has "$(cat "$HOME/stub-run.out")" "restarts in place once this turn ends"'
 rm -f "$HOME/daemon-up" "$HOME/stub.log"; ccp use 1 >/dev/null
 ok "readopt: no daemon running, nothing to restart" '! grep -q "daemon stop" "$HOME/stub.log" 2>/dev/null'
+touch "$HOME/daemon-up" "$HOME/daemon-stuck"; rm -f "$HOME/stub.log"
+out="$(CCP_DAEMON_WAIT=1 CCP_NO_RESPAWN=1 ccp use 3 2>&1)"
+ok "readopt: a daemon that does not restart is named, with what to run" 'has "$out" "did not restart" && has "$out" "claude daemon stop --any --keep-workers" && [ "$(grep -c "^daemon stop" "$HOME/stub.log")" = 2 ]'
+rm -f "$HOME/daemon-up" "$HOME/daemon-stuck" "$HOME/stub.log"; ccp use 1 >/dev/null
 # running background sessions restart in place once idle, so they take the new login now
 rm -f "$HOME/stub.log"; rm -rf "$P/respawning"
 STUB_KIND=bg STUB_SID=cccc0000-4444 STUB_TICKS=60 "$CCP_CLAUDE" --stay > "$T/bg.out" 2>&1 &
