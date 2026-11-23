@@ -235,6 +235,15 @@ cmd_login() {
   with_profile "$id" "$(real_claude)" auth login "$@"
 }
 
+back_email() {   # back_email "email<TAB>plan": #1's own address while ~/.claude.json still names the account it was lent
+  local f="$CCP_HOME/back-email" own lent
+  [ -s "$f" ] || { printf '%s\n' "$1"; return; }
+  own="$(sed -n 1p "$f")"; lent="$(sed -n 2p "$f")"
+  if [ -n "$own" ] && [ "${1%%$TAB*}" = "$lent" ]; then printf '%s\t%s\n' "$own" "${1#*$TAB}"; return; fi
+  [ "${1%%$TAB*}" = - ] || rm -f "$f"   # Claude Code has caught up (or #1 signed in elsewhere); not when it could not tell
+  printf '%s\n' "$1"
+}
+
 cmd_ls() {
   local cur id acc mark name i=0 iso p h
   h="$(holder)"; cur="$(resolve . | cut -f1)"; [ "$cur" = default ] && cur="$h"   # ~/.claude runs on the login it holds
@@ -244,7 +253,10 @@ cmd_ls() {
     if [ "$id" = default ] && [ "$h" != default ]; then   # its login is kept aside: auth status there shows the lent one
       acc="$(head -n 1 "$CCP_HOME/stash-email" 2>/dev/null)"   # ~/.claude.json names the lent account by now
       acc="${acc:--}${TAB}kept aside"
-    else acc="$(account "$id")"; fi
+    else
+      acc="$(account "$id")"
+      [ "$id" = default ] && acc="$(back_email "$acc")"
+    fi
     mark=" "; [ "$id" = "$cur" ] && mark="*"
     name="$id"; iso=""
     grep -q '^isolated=1' "$(pdir "$id")/.ccp" 2>/dev/null && iso=" (isolated)"
@@ -583,19 +595,39 @@ def oauth(o):
     return (o or {}).get("claudeAiOauth") or {}
 
 
-def stash_email(keep):   # #1's address while its login is kept aside: Claude Code soon writes the lent account's into ~/.claude.json
-    p = os.path.join(HOME_DIR, "stash-email")
-    if not keep:
-        try:
-            os.remove(p)
-        except FileNotFoundError:
-            pass
-        return
+def home_email():
     try:
         with open(os.path.expanduser("~/.claude.json")) as f:
-            e = (json.load(f).get("oauthAccount") or {}).get("emailAddress") or ""
+            return (json.load(f).get("oauthAccount") or {}).get("emailAddress") or ""
     except Exception:
-        e = ""
+        return ""
+
+
+def rm(p):
+    try:
+        os.remove(p)
+    except FileNotFoundError:
+        pass
+
+
+def stash_email(keep):   # #1's address while its login is kept aside: Claude Code soon writes the lent account's into ~/.claude.json
+    p = os.path.join(HOME_DIR, "stash-email")
+    back = os.path.join(HOME_DIR, "back-email")
+    if not keep:   # #1's login is back, but ~/.claude.json names the lent account until Claude Code rewrites it: keep both
+        try:
+            with open(p) as f:
+                e = f.readline().strip()
+        except Exception:
+            e = ""
+        rm(p)
+        if e:
+            with open(back, "w") as f:
+                f.write(e + "\n" + home_email() + "\n")
+        else:
+            rm(back)
+        return
+    rm(back)
+    e = home_email()
     if e:
         with open(p, "w") as f:
             f.write(e + "\n")
@@ -1170,6 +1202,24 @@ def email(d):
         return "-"
 
 
+def own_email(d):
+    """email(d), but #1's own address while ~/.claude.json still names the account it was lent."""
+    e = email(d)
+    p = os.path.join(os.environ.get("CCP_HOME_DIR") or "", "back-email")
+    try:
+        with open(p) as f:
+            own, lent = (f.read().split("\n") + ["", ""])[:2]
+    except Exception:
+        return e
+    if own and e == lent:
+        return own
+    try:
+        os.remove(p)
+    except Exception:
+        pass
+    return e
+
+
 def kept_email():
     """#1's address while its login is kept aside: ~/.claude.json names the lent account by then."""
     p = os.path.join(os.environ.get("CCP_HOME_DIR") or "", "stash-email")
@@ -1235,7 +1285,7 @@ def limits(u):
 def fetch(row, ask=True):
     c = creds(row)
     aside = SLOT != "default" and row["id"] == "default"
-    r = {"n": int(row["n"]), "id": row["id"], "label": row["label"], "email": kept_email() if aside else email(row["dir"]), "plan": plan(c),
+    r = {"n": int(row["n"]), "id": row["id"], "label": row["label"], "email": kept_email() if aside else (own_email(row["dir"]) if row["id"] == "default" else email(row["dir"])), "plan": plan(c),
          "limits": [], "error": None,
          "lendable": bool((c or {}).get("refreshToken"))}   # its login can go in ~/.claude (or come back there)
     if not c or not c.get("accessToken"):

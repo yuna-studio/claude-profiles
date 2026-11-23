@@ -45,7 +45,7 @@ if [ "${1:-}" = --stay ]; then   # a session that stays open, with the record Cl
 fi
 case "$1 ${2:-}" in
   "auth status")
-    if [ -f "$cfg/.stub-login" ]; then printf '{"loggedIn": true, "email": "%s@x.com", "subscriptionType": "max", "authMethod": "claude.ai"}\n' "$(basename "${CLAUDE_CONFIG_DIR:-default}")"
+    if [ -f "$cfg/.stub-login" ]; then printf '{"loggedIn": true, "email": "%s", "subscriptionType": "max", "authMethod": "claude.ai"}\n' "${STUB_EMAIL:-$(basename "${CLAUDE_CONFIG_DIR:-default}")@x.com}"
     else echo '{"loggedIn": false}'; exit 1; fi ;;
   "auth login") shift 2; echo "$*" > "$cfg/.stub-login" ;;
   "auth logout") rm -f "$cfg/.stub-login"; echo "logout ${CLAUDE_CONFIG_DIR:-default}" >> "$HOME/stub.log" ;;
@@ -340,8 +340,21 @@ echo '{"oauthAccount":{"emailAddress":"four@x.com"}}' > "$HOME/.claude.json"
 ok "ls: the kept-aside row shows #1's own address, not the lent account's" 'ccp ls | grep -q "^  1 *me@x.com *kept aside"'
 rm -f "$P/stash-email"
 ok "usage: kept aside by an older ccp without its address: asked once, then written down" 'has "$(ccp usage)" "me@x.com" && [ "$(cat "$P/stash-email")" = me@x.com ]'
-ccp use 1 >/dev/null; cp "$HOME/.claude.json.usage" "$HOME/.claude.json"
-ok "use 1: the address goes with the login it named" '[ ! -e "$P/stash-email" ]'
+ccp use 1 >/dev/null
+ok "use 1: the kept-aside address goes with the login it named" '[ ! -e "$P/stash-email" ]'
+ok "use 1: #1's address stays written down while ~/.claude.json still names the lent account" '[ "$(sed -n 1p "$P/back-email")" = me@x.com ] && [ "$(sed -n 2p "$P/back-email")" = four@x.com ]'
+had_login=0; [ -f "$HOME/.claude/.stub-login" ] && had_login=1; touch "$HOME/.claude/.stub-login"
+ok "ls after use 1: #1's row shows its own address, not the lent one ~/.claude.json still names" 'STUB_EMAIL=four@x.com ccp ls | grep -q "^. 1 *me@x.com "'
+ok "usage after use 1: #1's row shows its own address too" 'out="$(ccp usage)"; has "$out" "me@x.com" && [ -e "$P/back-email" ]'
+rm -f "$HOME/.claude/.stub-login"; ccp ls >/dev/null; touch "$HOME/.claude/.stub-login"
+ok "ls: a sign-in it cannot read does not drop what it wrote down" '[ -e "$P/back-email" ]'
+ok "ls: once Claude Code names #1 itself, the note is dropped" 'STUB_EMAIL=me@x.com ccp ls | grep -q "^. 1 *me@x.com " && [ ! -e "$P/back-email" ]'
+cp "$HOME/.claude.json.usage" "$HOME/.claude.json"; ccp use 3 >/dev/null
+echo '{"oauthAccount":{"emailAddress":"four@x.com"}}' > "$HOME/.claude.json"; ccp use 1 >/dev/null
+ok "use 1: the note is written again after the next lending" '[ -e "$P/back-email" ]'
+cp "$HOME/.claude.json.usage" "$HOME/.claude.json"
+ok "usage: once ~/.claude.json names #1 again, the note is dropped" 'has "$(ccp usage)" "me@x.com" && [ ! -e "$P/back-email" ]'
+[ "$had_login" = 1 ] || rm -f "$HOME/.claude/.stub-login"
 rm -f "$P/full" "$P/seen" "$P/asked"
 unset CCP_RETRY_WAIT
 
